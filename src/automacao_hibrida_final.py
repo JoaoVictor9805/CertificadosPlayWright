@@ -1,5 +1,11 @@
 import os
 import sys
+import warnings
+
+# Define STA (Single-Threaded Apartment) antes de qualquer importação do pywinauto/comtypes
+if not hasattr(sys, "coinit_flags"):
+    sys.coinit_flags = 2
+warnings.filterwarnings("ignore", message=".*Apply externally defined coinit_flags.*")
 import re
 import time
 import shutil
@@ -249,9 +255,11 @@ def clicar_botao_certificado_garantido(timeout_segundos: int = 30) -> bool:
             time.sleep(2.5)
             return True
 
-        if tentativa == 6:
-            logger.info("[FASE 1 - SO] Tentando leve rolagem da página para baixo...")
+        if tentativa % 6 == 0:
+            logger.info(f"[FASE 1 - SO] Tentando leve rolagem da página para baixo (tentativa {tentativa})...")
             try:
+                largura, altura = pyautogui.size()
+                pyautogui.moveTo(largura // 2, altura // 2)
                 pyautogui.scroll(-200)
             except Exception:
                 pass
@@ -727,9 +735,12 @@ def executar_robo_hibrido(
                 "i.fa-envelope.active, "
                 "div[class*='nao-lida']"
             )
-            loc_contador_aba = page.locator("text=/Caixa de Entrada\\s*\\([1-9]\\d*\\)/")
+            loc_contador_aba = page.get_by_text(re.compile(r"Caixa de Entrada\s*\([1-9]\d*\)", re.I))
             linhas_tabela = page.locator(".tabela.mensagens .linha, .tabela .linha")
-            msg_vazio = page.locator(".empty-row, text=/nenhum registro/i, text=/nenhuma mensagem/i, text=/não há mensagens/i")
+            msg_vazio = (
+                page.locator(".empty-row")
+                .or_(page.get_by_text(re.compile(r"nenhum registro|nenhuma mensagem|não há mensagens", re.I)))
+            )
             btn_exibir_todas = page.locator("span:has-text('Exibir todas'), a:has-text('Exibir todas'), button:has-text('Exibir todas')")
 
             tem_msg_nao_lida = False

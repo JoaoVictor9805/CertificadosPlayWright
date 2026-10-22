@@ -1,3 +1,12 @@
+import sys
+import warnings
+
+# Define STA (Single-Threaded Apartment) antes de qualquer importação de COM/pywinauto.
+# Isso impede conflitos que travam diálogos nativos do Windows (como filedialog.askdirectory).
+if not hasattr(sys, "coinit_flags"):
+    sys.coinit_flags = 2
+warnings.filterwarnings("ignore", message=".*Apply externally defined coinit_flags.*")
+
 import os
 import threading
 import logging
@@ -243,18 +252,26 @@ class AppDET(ctk.CTk):
         self.logger.addHandler(handler)
 
     def _acao_procurar(self):
-        """Abre o seletor de diretório do Windows."""
+        """Abre o seletor de diretório do Windows com suporte modal correto e foco garantido."""
         caminho_inicial = self.caminho_var.get().strip()
-        if not Path(caminho_inicial).exists():
+        try:
+            if not caminho_inicial or not Path(caminho_inicial).exists():
+                caminho_inicial = str(Path.home())
+        except Exception:
             caminho_inicial = str(Path.home())
 
         pasta_selecionada = filedialog.askdirectory(
+            parent=self,
             initialdir=caminho_inicial,
             title="Selecione o diretório de destino da automação"
         )
         if pasta_selecionada:
-            self.caminho_var.set(str(Path(pasta_selecionada)))
-            self.logger.info(f"Diretório selecionado: {pasta_selecionada}")
+            caminho_formatado = str(Path(pasta_selecionada))
+            self.caminho_var.set(caminho_formatado)
+            self.logger.info(f"Diretório selecionado: {caminho_formatado}")
+
+        self.lift()
+        self.focus_force()
 
     def _acao_acessar_resultado(self):
         """Abre a pasta 'CapturasDeTela' no Windows Explorer."""
@@ -267,7 +284,7 @@ class AppDET(ctk.CTk):
             os.startfile(str(pasta_prints))
         except Exception as e:
             self.logger.error(f"Erro ao acessar pasta de capturas: {e}")
-            messagebox.showerror("Erro", f"Não foi possível abrir a pasta de resultados:\n{e}")
+            messagebox.showerror("Erro", f"Não foi possível abrir a pasta de resultados:\n{e}", parent=self)
 
     def _acao_configurar_planilha(self):
         """
@@ -276,14 +293,14 @@ class AppDET(ctk.CTk):
         """
         caminho_str = self.caminho_var.get().strip()
         if not caminho_str:
-            messagebox.showerror("Aviso", "Por favor, especifique um diretório válido.")
+            messagebox.showerror("Aviso", "Por favor, especifique um diretório válido.", parent=self)
             return
 
         pasta_base = Path(caminho_str)
         try:
             pasta_base.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            messagebox.showerror("Erro de Permissão", f"Não foi possível acessar ou criar a pasta:\n{e}")
+            messagebox.showerror("Erro de Permissão", f"Não foi possível acessar ou criar a pasta:\n{e}", parent=self)
             return
 
         caminho_excel = pasta_base / "CNPJs.xlsx"
@@ -303,7 +320,7 @@ class AppDET(ctk.CTk):
                 self.logger.info(f"Planilha 'CNPJs.xlsx' criada com sucesso em: {caminho_excel}")
             except Exception as e:
                 self.logger.error(f"Falha ao criar planilha: {e}")
-                messagebox.showerror("Erro", f"Não foi possível criar o arquivo Excel:\n{e}")
+                messagebox.showerror("Erro", f"Não foi possível criar o arquivo Excel:\n{e}", parent=self)
                 return
         else:
             self.logger.info(f"Abrindo planilha existente em: {caminho_excel}")
@@ -312,20 +329,20 @@ class AppDET(ctk.CTk):
             os.startfile(str(caminho_excel))
         except Exception as e:
             self.logger.error(f"Erro ao abrir o Excel: {e}")
-            messagebox.showerror("Erro", f"Não foi possível iniciar o Excel automaticamente:\n{e}")
+            messagebox.showerror("Erro", f"Não foi possível iniciar o Excel automaticamente:\n{e}", parent=self)
 
     def _acao_iniciar(self):
         """Inicia a execução da automação em uma thread paralela."""
         caminho_str = self.caminho_var.get().strip()
         if not caminho_str:
-            messagebox.showwarning("Aviso", "Informe um caminho válido para a geração da pasta.")
+            messagebox.showwarning("Aviso", "Informe um caminho válido para a geração da pasta.", parent=self)
             return
 
         pasta_base = Path(caminho_str)
         try:
             pasta_base.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            messagebox.showerror("Erro de Pasta", f"Não foi possível acessar a pasta selecionada:\n{e}")
+            messagebox.showerror("Erro de Pasta", f"Não foi possível acessar a pasta selecionada:\n{e}", parent=self)
             return
 
         caminho_excel = pasta_base / "CNPJs.xlsx"
@@ -336,7 +353,8 @@ class AppDET(ctk.CTk):
             resp = messagebox.askyesno(
                 "Planilha não encontrada",
                 f"A planilha 'CNPJs.xlsx' não existe na pasta selecionada:\n{caminho_excel}\n\n"
-                "Deseja criá-la e abri-la agora para preencher?"
+                "Deseja criá-la e abri-la agora para preencher?",
+                parent=self
             )
             if resp:
                 self._acao_configurar_planilha()
