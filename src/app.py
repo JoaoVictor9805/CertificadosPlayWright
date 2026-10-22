@@ -315,6 +315,7 @@ class AppDET(ctk.CTk):
                 ws = wb.active
                 ws.title = "Documentos"
                 ws["A1"] = "CNPJ"
+                ws["B1"] = "Certificado"
                 wb.save(str(caminho_excel))
                 wb.close()
                 self.logger.info(f"Planilha 'CNPJs.xlsx' criada com sucesso em: {caminho_excel}")

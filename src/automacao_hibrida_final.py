@@ -15,6 +15,7 @@ import ctypes
 import logging
 import threading
 from typing import Optional, Callable
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -349,6 +350,130 @@ def confirmar_popup_certificado(timeout_segundos: int = 25) -> bool:
     return True
 
 
+def selecionar_e_confirmar_certificado(termo_busca: str = "", timeout_segundos: int = 25) -> bool:
+    """
+    Localiza o popup nativo de certificado do Chrome, seleciona o certificado desejado
+    pelo nome completo, CNPJ ou termo fornecido (suporta busca e rolagem para listas longas),
+    salva screenshot de diagnóstico e confirma com OK/ENTER.
+    """
+    termo_str = str(termo_busca or "").strip()
+    logger.info(f"[FASE 1 - SO] Aguardando popup de certificado para selecionar: '{termo_str or 'Padrão'}'...")
+    time.sleep(1.0)
+    fim = time.time() + timeout_segundos
+    tentativa = 0
+
+    # Extrai CNPJ (14 dígitos) do termo de busca se presente
+    cnpj_busca = re.sub(r"\D", "", termo_str)
+    if len(cnpj_busca) != 14:
+        cnpj_busca = ""
+
+    while time.time() < fim:
+        tentativa += 1
+        try:
+            desktop = Desktop(backend="uia")
+            janela_cert = None
+            for win in desktop.windows():
+                titulo = win.window_text().lower()
+                palavras_chave = [
+                    "gov.br", "acesse sua conta", "selecionar um certificado",
+                    "selecione um certificado", "certificado", "segurança do windows", "windows security", "segurança"
+                ]
+                if any(k in titulo for k in palavras_chave):
+                    janela_cert = win
+                    break
+
+            if janela_cert:
+                focar_janela_segura(janela_cert)
+                logger.info(f"[CERTIFICADO] Janela de certificado localizada: '{janela_cert.window_text()}'")
+
+                if not termo_str:
+                    logger.info("[CERTIFICADO] Nenhum certificado específico informado na planilha; mantendo seleção padrão.")
+                else:
+                    item_alvo = None
+
+                    def buscar_item_na_arvore():
+                        for el in janela_cert.descendants():
+                            try:
+                                nome = el.window_text() or el.element_info.name or ""
+                                nome_limpo = nome.strip()
+                                if not nome_limpo:
+                                    continue
+                                # Critério A: CNPJ de 14 dígitos idêntico
+                                if cnpj_busca and cnpj_busca in nome_limpo:
+                                    return el
+                                # Critério B: Nome completo ou termo contido no elemento
+                                if termo_str.lower() in nome_limpo.lower() or nome_limpo.lower() in termo_str.lower():
+                                    return el
+                            except Exception:
+                                pass
+                        return None
+
+                    item_alvo = buscar_item_na_arvore()
+
+                    # Se não encontrou de imediato, pode ser uma lista longa com muitos certificados instalados
+                    if not item_alvo:
+                        logger.info(f"[CERTIFICADO] Certificado '{termo_str}' não visível de imediato. Percorrendo lista com rolagem (seta para baixo)...")
+                        send_keys("{HOME}")
+                        time.sleep(0.4)
+                        for passo in range(25):  # Suporta até 25+ certificados
+                            item_alvo = buscar_item_na_arvore()
+                            if item_alvo:
+                                logger.info(f"[CERTIFICADO] Certificado localizado após rolagem no passo {passo + 1}!")
+                                break
+                            send_keys("{DOWN}")
+                            time.sleep(0.2)
+
+                    if item_alvo:
+                        logger.info(f"[CERTIFICADO] Item correspondente encontrado via UIA: '{item_alvo.window_text()}'! Clicando...")
+                        try:
+                            item_alvo.click_input()
+                            time.sleep(0.8)
+                        except Exception as e_click:
+                            logger.warning(f"[CERTIFICADO] Falha no click_input direto: {e_click}. Tentando via ENTER...")
+                    else:
+                        logger.warning(f"[CERTIFICADO] AVISO: Certificado '{termo_str}' não foi encontrado na lista. Mantendo seleção atual.")
+
+                # Captura screenshot de depuração para confirmação visual da seleção (fundo azul)
+                try:
+                    caminho_debug = BASE_DIR / "debug_certificado_selecionado.png"
+                    pyautogui.screenshot(str(caminho_debug))
+                    logger.info(f"[DIAGNÓSTICO] Screenshot da seleção salvo em: {caminho_debug.name}")
+                except Exception:
+                    pass
+
+                # Confirma clicando no botão OK via UIA ou Imagem
+                btns_ok = janela_cert.descendants(control_type="Button", title="OK")
+                if btns_ok:
+                    logger.info("[CERTIFICADO] Clicando no botão 'OK' via UIA...")
+                    time.sleep(0.5)
+                    btns_ok[0].click_input()
+                    time.sleep(2.0)
+                    return True
+
+                pos_ok = localizar_imagem(IMG_OK, confidence=0.7)
+                if pos_ok:
+                    logger.info(f"[CERTIFICADO] Clicando no botão 'OK' via imagem ({pos_ok.x}, {pos_ok.y})...")
+                    time.sleep(0.5)
+                    clicar_robusto(pos_ok.x, pos_ok.y)
+                    time.sleep(2.0)
+                    return True
+
+                logger.info("[CERTIFICADO] Confirmando via tecla ENTER...")
+                time.sleep(0.5)
+                send_keys("{ENTER}")
+                time.sleep(2.0)
+                return True
+
+        except Exception as e:
+            logger.warning(f"[CERTIFICADO] Tentativa {tentativa} falhou: {e}")
+
+        time.sleep(0.8)
+
+    # Fallback final se o loop acima esgotar
+    logger.info("[FASE 1 - SO] Fallback: chamando confirmar_popup_certificado padrão...")
+    return confirmar_popup_certificado(timeout_segundos=10)
+
+
 def fechar_navegador(browser=None, context=None, page=None):
     """
     Fecha a janela do Chrome real via comando CDP 'Browser.close'
@@ -404,9 +529,424 @@ def exibir_alerta_planilha_inexistente(caminho_criado: Path):
     mensagem = (
         "A Planilha de referência para consulta de CNPJs não existia.\n\n"
         f"A planilha foi criada no caminho:\n{caminho_criado}\n\n"
-        "Por favor, preencha com os CNPJs desejados na coluna 'CNPJ', um abaixo do outro, e execute o robô novamente."
+        "Por favor, preencha com os CNPJs na coluna 'CNPJ' e o nome do certificado na coluna 'Certificado', e execute o robô novamente."
     )
     ctypes.windll.user32.MessageBoxW(0, mensagem, "Planilha de Referência não existe", 0x30)
+
+
+def efetuar_logout_det(page):
+    """Efetua logout na sessão atual do DET clicando no botão Sair e confirmando."""
+    if not page:
+        return
+    try:
+        if page.is_closed():
+            return
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        logger.info("Efetuando logout no sistema DET...")
+
+        btn_sair = page.locator("br-button:has-text('Sair'), button:has-text('Sair'), a:has-text('Sair')").first
+        if not btn_sair.is_visible():
+            btn_sair = page.get_by_text(re.compile(r"^\s*Sair\s*$", re.IGNORECASE)).first
+
+        if btn_sair.is_visible():
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            btn_sair.click()
+            logger.info("Clique no botão 'Sair' realizado.")
+            time.sleep(DELAY_ENTRE_ACOES_S)
+
+            btn_confirmar = page.locator("button:has-text('Sim'), button:has-text('Confirmar'), br-button:has-text('Sim')").first
+            try:
+                if btn_confirmar.is_visible(timeout=2500):
+                    btn_confirmar.click()
+                    time.sleep(DELAY_ENTRE_ACOES_S)
+            except Exception:
+                pass
+
+            time.sleep(1.5)
+        else:
+            logger.info("Botão 'Sair' não localizado no cabeçalho.")
+    except Exception as e:
+        logger.warning(f"Aviso durante tentativa de logout: {e}")
+
+
+def processar_item_det(
+    page,
+    item_id: str,
+    idx_item: int,
+    total_itens: int,
+    screenshots_dir: Path,
+    hoje_date,
+    perfil_ref: list,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> bool:
+    """
+    Processa um único CNPJ/CPF dentro de uma sessão autenticada do DET:
+    1. Troca de perfil para o procurador e digita o CNPJ.
+    2. Valida se o CNPJ é aceito.
+    3. Abre Caixa Postal, aplica filtro de não lidas e tira print se houver.
+    4. Abre Notificações, confere datas, tira prints e baixa anexos.
+    5. Retorna à tela de Serviços.
+    """
+    etapa = "Início"
+    try:
+        etapa = "Lendo o item da planilha"
+        log_etapa(item_id, etapa, "Iniciando o processamento do item")
+
+        etapa = "Aguardando a tela de serviços"
+        page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))").wait_for(state="visible", timeout=60000)
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
+        etapa = "Trocando de perfil"
+        btn_trocar_perfil = page.locator("button:has-text('Trocar Perfil')").first
+        btn_trocar_perfil.wait_for(state="visible", timeout=20000)
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        btn_trocar_perfil.click()
+        time.sleep(2)
+
+        # Clica no dropdown de seleção de perfil e navega via teclado como no PAD
+        dropdown_perfil = page.locator("ng-select, .br-select, span.ng-arrow-wrapper").first
+        dropdown_perfil.click()
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
+        if perfil_ref[0] == 0:
+            perfil_ref[0] += 1
+            page.keyboard.press("ArrowDown")
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            page.keyboard.press("Enter")
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            page.keyboard.press("Tab")
+        else:
+            page.keyboard.press("ArrowDown")
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            page.keyboard.press("ArrowDown")
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            page.keyboard.press("Enter")
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            page.keyboard.press("Tab")
+
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        page.keyboard.type(item_id, delay=100)
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
+        etapa = "Selecionando o perfil e validando CPF/CNPJ"
+        page.locator("button:has-text('Selecionar')").first.click()
+        time.sleep(2)
+
+        # Verifica se apareceu mensagem de CPF/CNPJ inválido no DOM
+        msg_invalido = page.get_by_text(re.compile(r"(CNPJ|CPF)\s+inv.lido", re.IGNORECASE))
+        if msg_invalido.count() > 0 and msg_invalido.first.is_visible():
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            page.locator("button:has-text('Cancelar')").first.click()
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            logger.warning(f"Documento inválido, item ignorado: {item_id}")
+            if progress_callback:
+                progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} inválido")
+            return False
+
+        # Criação de pastas do item
+        etapa = "Criando a pasta do item"
+        pasta_item = screenshots_dir / item_id
+        pasta_caixa_postal = pasta_item / "CaixaPostal"
+        pasta_notificacao = pasta_item / "Notificacao"
+        pasta_arquivos_baixados = pasta_item / "ArquivosBaixados"
+
+        pasta_caixa_postal.mkdir(parents=True, exist_ok=True)
+        pasta_notificacao.mkdir(parents=True, exist_ok=True)
+        pasta_arquivos_baixados.mkdir(parents=True, exist_ok=True)
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
+        # --- CAIXA POSTAL ---
+        etapa = "Abrindo a Caixa Postal"
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        card_cp = page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
+        card_cp.wait_for(state="visible", timeout=30000)
+        card_cp.click()
+        time.sleep(2)
+        formatted_dt = datetime.now().strftime("%d%m%Y_%H%M%S")
+
+        # 1. Primeiro: clica em 'Exibir apenas não lidas'
+        etapa = "Filtrando por mensagens não lidas"
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
+        loc_nao_lidas_filtro = page.locator(
+            "span:has-text('Exibir apenas não lidas'), "
+            "a:has-text('Exibir apenas não lidas'), "
+            "button:has-text('Exibir apenas não lidas')"
+        ).first
+
+        clicou_filtro = False
+        try:
+            loc_nao_lidas_filtro.wait_for(state="visible", timeout=8000)
+            time.sleep(0.3)
+            loc_nao_lidas_filtro.click()
+            clicou_filtro = True
+            log_etapa(item_id, etapa, "Filtro 'Exibir apenas não lidas' acionado com sucesso.")
+            time.sleep(2)
+        except Exception:
+            try:
+                btn_fallback = page.get_by_text("Exibir apenas não lidas", exact=False).first
+                if btn_fallback.is_visible():
+                    btn_fallback.click()
+                    clicou_filtro = True
+                    log_etapa(item_id, etapa, "Filtro 'Exibir apenas não lidas' acionado via get_by_text.")
+                    time.sleep(2)
+            except Exception:
+                pass
+
+        if clicou_filtro:
+            try:
+                page.mouse.move(0, 0)
+            except Exception:
+                pass
+        else:
+            btn_todas = page.locator("span:has-text('Exibir todas'), a:has-text('Exibir todas'), button:has-text('Exibir todas')").first
+            if btn_todas.is_visible():
+                log_etapa(item_id, etapa, "Filtro de não lidas já está ativo ('Exibir todas' presente).")
+            else:
+                log_etapa(item_id, etapa, "Aviso: opção 'Exibir apenas não lidas' não foi localizada.")
+
+        # 2. Depois de filtrar: verifica se há mensagens não lidas na tela e tira o print
+        etapa = "Tirando o print da Caixa Postal"
+        time.sleep(0.5)
+
+        loc_nao_lidas = page.locator(
+            ".linha.nao-lida, "
+            ".linha:has(i.fa-envelope.active), "
+            ".linha:has(i.fa-envelope), "
+            "i.fa-envelope.active, "
+            "div[class*='nao-lida']"
+        )
+        loc_contador_aba = page.get_by_text(re.compile(r"Caixa de Entrada\s*\([1-9]\d*\)", re.I))
+        linhas_tabela = page.locator(".tabela.mensagens .linha, .tabela .linha")
+        msg_vazio = (
+            page.locator(".empty-row")
+            .or_(page.get_by_text(re.compile(r"nenhum registro|nenhuma mensagem|não há mensagens", re.I)))
+        )
+        btn_exibir_todas = page.locator("span:has-text('Exibir todas'), a:has-text('Exibir todas'), button:has-text('Exibir todas')")
+
+        tem_msg_nao_lida = False
+        try:
+            if loc_nao_lidas.count() > 0 and loc_nao_lidas.first.is_visible():
+                tem_msg_nao_lida = True
+            elif loc_contador_aba.count() > 0 and loc_contador_aba.first.is_visible():
+                tem_msg_nao_lida = True
+            else:
+                filtro_ativo = btn_exibir_todas.count() > 0 and btn_exibir_todas.first.is_visible()
+                tabela_tem_linhas = linhas_tabela.count() > 0 and linhas_tabela.first.is_visible()
+                tabela_vazia = msg_vazio.count() > 0 and msg_vazio.first.is_visible()
+
+                if (filtro_ativo or clicou_filtro) and tabela_tem_linhas and not tabela_vazia:
+                    tem_msg_nao_lida = True
+                else:
+                    try:
+                        loc_nao_lidas.first.wait_for(state="visible", timeout=3000)
+                        tem_msg_nao_lida = True
+                    except PlaywrightTimeoutError:
+                        tem_msg_nao_lida = False
+        except Exception as e:
+            logger.warning(f"Erro ao verificar mensagens não lidas: {e}")
+            tem_msg_nao_lida = False
+
+        if tem_msg_nao_lida:
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            try:
+                page.mouse.move(0, 0)
+                time.sleep(0.6)
+                page.evaluate("""() => {
+                    const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                    tooltips.forEach(t => t.remove());
+                }""")
+            except Exception:
+                pass
+
+            caminho_print_cp = pasta_caixa_postal / f"{item_id}_{formatted_dt}.jpg"
+            page.screenshot(path=str(caminho_print_cp), type="jpeg")
+            log_etapa(item_id, etapa, "Print da Caixa Postal realizado com sucesso (mensagem não lida encontrada após filtro).")
+            time.sleep(DELAY_ENTRE_ACOES_S)
+        else:
+            log_etapa(item_id, etapa, "Nenhuma mensagem não lida encontrada na Caixa Postal.")
+
+        # Volta para a tela de Serviços
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        btn_voltar = page.locator("a:has-text('Serviços'), button:has-text('Voltar'), i.fa-arrow-left, i.fa-home").first
+        if btn_voltar.is_visible():
+            btn_voltar.click()
+        else:
+            page.goto(URL_SERVICOS, timeout=60000)
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
+        # --- NOTIFICAÇÃO ---
+        etapa = "Abrindo a tela de Notificação"
+        card_notificacao = page.locator(".cardListItem:has(span.title:has-text('NOTIFICAÇÃO'))")
+        card_notificacao.wait_for(state="visible", timeout=60000)
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        card_notificacao.click()
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
+        etapa = "Tirando o print da Notificação"
+        linhas_notif = page.locator("ngx-datatable datatable-row-wrapper")
+        try:
+            linhas_notif.first.wait_for(state="visible", timeout=10000)
+            tem_notificacoes = True
+        except PlaywrightTimeoutError:
+            tem_notificacoes = False
+
+        etapa = "Lendo a lista de notificações"
+        if tem_notificacoes:
+            qtd_linhas = linhas_notif.count()
+            log_etapa(
+                item_id,
+                etapa,
+                f"Lista de notificações lida: {qtd_linhas} linha(s) extraída(s). Data de hoje considerada: {hoje_date.strftime('%d/%m/%Y')}",
+            )
+
+            dados_linhas = []
+            existe_notificacao_valida = False
+
+            for idx in range(qtd_linhas):
+                row_loc = linhas_notif.nth(idx)
+
+                texto_data = ""
+                todas_celulas = row_loc.locator("datatable-body-cell").all()
+                for cell in todas_celulas:
+                    c_txt = cell.inner_text().strip()
+                    m = re.search(r"\b(\d{2}/\d{2}/\d{2,4})\b", c_txt)
+                    if m:
+                        texto_data = m.group(1)
+                        break
+
+                if not texto_data and len(todas_celulas) > 5:
+                    try:
+                        texto_data = todas_celulas[5].inner_text().strip()
+                    except Exception:
+                        pass
+
+                data_notif = None
+                valida = False
+                for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+                    try:
+                        data_notif = datetime.strptime(texto_data, fmt).date()
+                        break
+                    except ValueError:
+                        pass
+
+                if data_notif:
+                    valida = (data_notif <= hoje_date) if MODO_TESTE else (data_notif >= hoje_date)
+
+                if valida:
+                    existe_notificacao_valida = True
+                dados_linhas.append((idx, texto_data, valida))
+
+            if not existe_notificacao_valida:
+                log_etapa(item_id, etapa, "Nenhuma notificação possui data válida e o print foi ignorado.")
+
+            for idx, texto_data, linha_valida in dados_linhas:
+                etapa = f"Lendo a data da linha {idx}"
+                if linha_valida:
+                    row_loc = linhas_notif.nth(idx)
+
+                    etapa = f"Rolando a página até a linha {idx}"
+                    row_loc.scroll_into_view_if_needed()
+                    time.sleep(DELAY_ENTRE_ACOES_S)
+
+                    etapa = f"Tirando print recortado da linha {idx}"
+                    caminho_print_linha = pasta_notificacao / f"{item_id}_linha_{idx}_{formatted_dt}.jpg"
+                    row_loc.screenshot(path=str(caminho_print_linha), type="jpeg")
+                    time.sleep(DELAY_ENTRE_ACOES_S)
+                    log_etapa(
+                        item_id,
+                        etapa,
+                        f"Print recortado da linha {idx} (data {texto_data}) realizado com sucesso.",
+                    )
+
+                    etapa = f"Localizando o botão de download da linha {idx}"
+                    candidatos_download = row_loc.locator(
+                        "button:has(i.fa-download), a:has(i.fa-download), "
+                        "button:has(i.fa-print), a:has(i.fa-print), "
+                        "button[title*='Download'], button[title*='Baixar'], button[title*='Imprimir']"
+                    )
+                    btn_download = None
+                    if candidatos_download.count() > 0:
+                        btn_download = candidatos_download.first
+                    else:
+                        celula_acoes = row_loc.locator("datatable-body-cell").last
+                        botoes_acoes = celula_acoes.locator("button, a")
+                        if botoes_acoes.count() > 1:
+                            btn_download = botoes_acoes.nth(1)
+                        elif botoes_acoes.count() == 1:
+                            btn_download = botoes_acoes.first
+
+                    if btn_download and btn_download.count() > 0 and btn_download.is_visible():
+                        log_etapa(item_id, etapa, f"Linha {idx} (data {texto_data}): clicando no botão de download")
+                        try:
+                            etapa = f"Aguardando o download da linha {idx}"
+                            time.sleep(DELAY_ENTRE_ACOES_S)
+                            with page.expect_download(timeout=60000) as download_info:
+                                btn_download.click()
+                                log_etapa(item_id, etapa, f"Linha {idx}: clique no botão de download realizado")
+
+                            download = download_info.value
+                            sug_name = download.suggested_filename
+                            destino_final = pasta_arquivos_baixados / sug_name
+                            if destino_final.exists():
+                                stem = destino_final.stem
+                                ext = destino_final.suffix
+                                destino_final = pasta_arquivos_baixados / f"{stem}_linha_{idx}{ext}"
+
+                            download.save_as(str(destino_final))
+                            time.sleep(DELAY_ENTRE_ACOES_S)
+                            log_etapa(
+                                item_id,
+                                etapa,
+                                f"Linha {idx}: arquivo baixado e movido para ArquivosBaixados ({destino_final.name})",
+                            )
+                        except PlaywrightTimeoutError:
+                            log_etapa(
+                                item_id,
+                                etapa,
+                                f"AVISO: download não detectado em 60s (linha {idx})",
+                            )
+                    else:
+                        log_etapa(
+                            item_id,
+                            etapa,
+                            f"Linha {idx} (data {texto_data}): notificação válida sem botão de download (apenas leitura).",
+                        )
+                else:
+                    log_etapa(
+                        item_id,
+                        etapa,
+                        f"Linha {idx} ignorada: data {texto_data} fora do critério (ModoTeste={MODO_TESTE}, hoje={hoje_date.strftime('%d/%m/%Y')})",
+                    )
+        else:
+            log_etapa(item_id, etapa, "Nenhuma notificação listada na tela de Notificação")
+
+        # Retorna à tela de serviços
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        page.goto(URL_SERVICOS, timeout=60000)
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
+        # Limpeza de diretórios vazios e contabilização
+        etapa = "Limpando subpastas vazias"
+        remover_pastas_vazias_do_item(pasta_item)
+
+        arquivos_guardados = list(pasta_item.rglob("*")) if pasta_item.exists() else []
+        qtd_arquivos = sum(1 for f in arquivos_guardados if f.is_file())
+
+        logger.info(
+            f"SUCESSO: O item '{item_id}' foi verificado. Arquivos guardados (prints + downloads): {qtd_arquivos}"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"Erro no item '{item_id}' na etapa '{etapa}': {e}")
+        try:
+            page.goto(URL_SERVICOS, timeout=60000)
+        except Exception:
+            pass
+        return False
 
 
 # ==============================================================================
@@ -424,14 +964,12 @@ def executar_robo_hibrido(
 
     excel_path = base_dir / "CNPJs.xlsx"
     if not excel_path.exists():
-        # Fallback de compatibilidade caso o arquivo anterior exista
         legado_path = base_dir / "CNPJs-e-CPFs.xlsx"
         if legado_path.exists():
             excel_path = legado_path
 
     screenshots_dir = base_dir / "CapturasDeTela"
     hoje_date = datetime.now().date()
-    arquivos_pendentes_excluir = []
 
     # 1. Verificação da Planilha de Entrada
     if not excel_path.exists():
@@ -442,6 +980,7 @@ def executar_robo_hibrido(
             ws = wb.active
             ws.title = "Documentos"
             ws["A1"] = "CNPJ"
+            ws["B1"] = "Certificado"
             wb.save(str(excel_path))
             wb.close()
             logger.info(f"Planilha modelo criada com sucesso em: {excel_path}")
@@ -450,578 +989,223 @@ def executar_robo_hibrido(
         exibir_alerta_planilha_inexistente(excel_path)
         return
 
+    # Leitura das linhas da planilha: Coluna A = CNPJ, Coluna B = Certificado
     try:
         wb = openpyxl.load_workbook(str(excel_path), data_only=True)
         sheet = wb.active
-        raw_cells = [
-            str(cell.value).strip()
-            for row in sheet.iter_rows(values_only=False)
-            for cell in row
-            if cell.value is not None and str(cell.value).strip() != ""
-        ]
+        linhas_lidas = []
+        for row in sheet.iter_rows(min_row=1, values_only=True):
+            if not row:
+                continue
+            col_a = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
+            col_b = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+            if col_a:
+                linhas_lidas.append((col_a, col_b))
         wb.close()
     except Exception as e:
         logger.error(f"Erro ao ler a planilha {excel_path}: {e}")
         return
 
-    # Filtra cabeçalhos conhecidos e linhas vazias
+    # Filtra cabeçalhos conhecidos
     header_names = {"CNPJ_OU_CPF", "CNPJ_E_CPF", "CNPJS_E_CPFS", "CNPJ", "CPF", "DOCUMENTO", "DOCUMENTOS"}
-    excel_data = [item for item in raw_cells if item.upper() not in header_names]
+    dados_filtrados = [
+        (doc, cert) for doc, cert in linhas_lidas
+        if doc.upper() not in header_names
+    ]
 
-    if not excel_data:
+    if not dados_filtrados:
         logger.warning(
             f"A planilha em '{excel_path}' não contém CNPJs ou CPFs para processar. Preencha e inicie novamente."
         )
         return
 
-    total_itens = len(excel_data)
-    logger.info(f"Planilha carregada com sucesso. Total de itens a processar: {total_itens}")
+    # Agrupamento inteligente por certificado (preserva ordem de inserção)
+    # Mesmo se o usuário preencher aleatoriamente na planilha, agrupa para abrir apenas 1 sessão por certificado
+    grupos_certificados = defaultdict(list)
+    for doc, cert in dados_filtrados:
+        cert_chave = cert.strip()  # se vazio, vira string vazia (certificado padrão)
+        grupos_certificados[cert_chave].append(doc)
+
+    total_itens = len(dados_filtrados)
+    total_grupos = len(grupos_certificados)
+    logger.info(
+        f"Planilha carregada com sucesso. Total de itens: {total_itens} distribuídos em {total_grupos} grupo(s) de certificado."
+    )
     if progress_callback:
         progress_callback(0, total_itens, f"Iniciando automação... (0/{total_itens})")
 
     limpar_ou_criar_pasta(screenshots_dir)
 
-    playwright_mgr = None
-    browser = None
-    context = None
-    page = None
+    item_global_idx = 0
 
-    try:
-        # ======================================================================
-        # FASE 1: Login via Sistema Operacional (PyAutoGUI - Sem rastro de CDP)
-        # ======================================================================
-        logger.info("Iniciando Fase 1: Abertura do Chrome e Login Físico via Sistema...")
-        liberar_porta_se_ocupada()
-        iniciar_chrome_hibrido()
-
-        chrome_win = obter_janela_chrome(timeout_segundos=30)
-        focar_janela_segura(chrome_win)
-        time.sleep(2)
-
+    # Itera sobre cada grupo de certificado
+    for num_grupo, (cert_alvo, lista_cnpjs) in enumerate(grupos_certificados.items(), start=1):
         if stop_event and stop_event.is_set():
-            logger.warning("Execução interrompida antes do login.")
-            fechar_navegador(browser, context, page)
-            return
+            logger.warning("Execução cancelada antes do próximo grupo de certificados.")
+            break
 
-        # Clica em 'Entrar com gov.br'
-        if not clicar_botao_govbr_garantido(timeout_segundos=25):
-            logger.error("Erro: Não foi possível localizar o botão 'Entrar com gov.br'.")
-            fechar_navegador(browser, context, page)
-            return
+        nome_cert_exibicao = cert_alvo if cert_alvo else "Padrão"
+        logger.info(
+            f"\n{'='*60}\n>>> INICIANDO GRUPO {num_grupo}/{total_grupos}: Certificado '{nome_cert_exibicao}' ({len(lista_cnpjs)} CNPJs)\n{'='*60}"
+        )
 
-        if stop_event and stop_event.is_set():
-            logger.warning("Execução interrompida após clique no gov.br.")
-            fechar_navegador(browser, context, page)
-            return
+        playwright_mgr = None
+        browser = None
+        context = None
+        page = None
 
-        # Clica em 'Seu certificado digital'
-        if not clicar_botao_certificado_garantido(timeout_segundos=30):
-            logger.error("Erro: Não foi possível localizar 'Seu certificado digital'.")
-            fechar_navegador(browser, context, page)
-            return
+        try:
+            # ==================================================================
+            # FASE 1: Login via Sistema Operacional (Chrome Híbrido)
+            # ==================================================================
+            logger.info("Iniciando Fase 1: Abertura do Chrome e Login Físico via Sistema...")
+            liberar_porta_se_ocupada()
+            iniciar_chrome_hibrido()
 
-        if stop_event and stop_event.is_set():
-            logger.warning("Execução interrompida antes da seleção do certificado.")
-            fechar_navegador(browser, context, page)
-            return
+            chrome_win = obter_janela_chrome(timeout_segundos=30)
+            focar_janela_segura(chrome_win)
+            time.sleep(2)
 
-        # Confirma popup nativo de certificado
-        confirmar_popup_certificado(timeout_segundos=25)
-
-        logger.info("Fase 1 concluída: Autenticação enviada. Conectando Playwright...")
-
-        # ======================================================================
-        # FASE 2: Conexão e Controle do Playwright após autenticação
-        # ======================================================================
-        playwright_mgr = sync_playwright().start()
-
-        # Conecta via CDP com retentativas para aguardar estabilização do Chrome
-        for tentativa_cdp in range(1, 6):
             if stop_event and stop_event.is_set():
+                logger.warning("Execução interrompida antes do login.")
+                fechar_navegador(browser, context, page)
                 break
-            try:
-                browser = playwright_mgr.chromium.connect_over_cdp(
-                    f"http://127.0.0.1:{CDP_PORT}",
-                    slow_mo=DELAY_SLOW_MO_MS
-                )
-                break
-            except Exception:
-                time.sleep(2)
 
-        if not browser:
-            logger.error("Erro fatal: Não foi possível conectar o Playwright via CDP após 5 tentativas.")
-            if playwright_mgr:
-                playwright_mgr.stop()
-            return
-
-        context = browser.contexts[0]
-        page = context.pages[0] if context.pages else context.new_page()
-
-        # Aguarda carregar a tela de Serviços (Caixa Postal)
-        try:
-            page.wait_for_url("**/servicos**", timeout=45000)
-        except Exception:
-            pass
-
-        card_caixa_postal = page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
-        card_caixa_postal.wait_for(state="visible", timeout=30000)
-        time.sleep(DELAY_ENTRE_ACOES_S)
-
-        logger.info("Fase 2 estabelecida: Playwright conectado e tela de Serviços confirmada!")
-
-    except Exception as e:
-        logger.error(f"Erro fatal no robô (fase de preparação ou login): {e}")
-        fechar_navegador(browser, context, page)
-        if playwright_mgr:
-            playwright_mgr.stop()
-        raise
-
-    # ==========================================================================
-    # 3. Loop de Processamento de CPFs / CNPJs (Playwright rápido e preciso)
-    # ==========================================================================
-    perfil = 0
-    falhas_seguidas = 0
-    etapa = "Início"
-
-    for idx_item, current_item in enumerate(excel_data, start=1):
-        if stop_event and stop_event.is_set():
-            logger.warning("Execução cancelada pelo usuário.")
-            break
-
-        if falhas_seguidas >= 3:
-            logger.error("Execução interrompida: 3 falhas seguidas. Os itens restantes não foram processados.")
-            break
-
-        item_id = current_item.strip()
-        if not item_id:
-            continue
-
-        if progress_callback:
-            progress_callback(idx_item - 1, total_itens, f"Processando item {idx_item}/{total_itens}: {item_id}")
-
-        try:
-            etapa = "Lendo o item da planilha"
-            log_etapa(item_id, etapa, "Iniciando o processamento do item")
-
-            etapa = "Aguardando a tela de serviços"
-            page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))").wait_for(state="visible", timeout=60000)
-            time.sleep(DELAY_ENTRE_ACOES_S)
-
-            etapa = "Trocando de perfil"
-            btn_trocar_perfil = page.locator("button:has-text('Trocar Perfil')").first
-            btn_trocar_perfil.wait_for(state="visible", timeout=20000)
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            btn_trocar_perfil.click()
-            time.sleep(2)
-
-            # Clica no dropdown de seleção de perfil e navega via teclado como no PAD
-            dropdown_perfil = page.locator("ng-select, .br-select, span.ng-arrow-wrapper").first
-            dropdown_perfil.click()
-            time.sleep(DELAY_ENTRE_ACOES_S)
-
-            if perfil == 0:
-                perfil += 1
-                page.keyboard.press("ArrowDown")
-                time.sleep(DELAY_ENTRE_ACOES_S)
-                page.keyboard.press("Enter")
-                time.sleep(DELAY_ENTRE_ACOES_S)
-                page.keyboard.press("Tab")
-            else:
-                page.keyboard.press("ArrowDown")
-                time.sleep(DELAY_ENTRE_ACOES_S)
-                page.keyboard.press("ArrowDown")
-                time.sleep(DELAY_ENTRE_ACOES_S)
-                page.keyboard.press("Enter")
-                time.sleep(DELAY_ENTRE_ACOES_S)
-                page.keyboard.press("Tab")
-
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            page.keyboard.type(item_id, delay=100)
-            time.sleep(DELAY_ENTRE_ACOES_S)
-
-            etapa = "Selecionando o perfil e validando CPF/CNPJ"
-            page.locator("button:has-text('Selecionar')").first.click()
-            time.sleep(2)
-
-            # Verifica se apareceu mensagem de CPF/CNPJ inválido no DOM
-            msg_invalido = page.get_by_text(re.compile(r"(CNPJ|CPF)\s+inv.lido", re.IGNORECASE))
-            if msg_invalido.count() > 0 and msg_invalido.first.is_visible():
-                time.sleep(DELAY_ENTRE_ACOES_S)
-                page.locator("button:has-text('Cancelar')").first.click()
-                time.sleep(DELAY_ENTRE_ACOES_S)
-                logger.warning(f"Documento inválido, item ignorado: {item_id}")
-                if progress_callback:
-                    progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} inválido")
+            if not clicar_botao_govbr_garantido(timeout_segundos=25):
+                logger.error("Erro: Não foi possível localizar o botão 'Entrar com gov.br'.")
+                fechar_navegador(browser, context, page)
                 continue
 
-            # Criação de pastas do item
-            etapa = "Criando a pasta do item"
-            pasta_item = screenshots_dir / item_id
-            pasta_caixa_postal = pasta_item / "CaixaPostal"
-            pasta_notificacao = pasta_item / "Notificacao"
-            pasta_arquivos_baixados = pasta_item / "ArquivosBaixados"
+            if stop_event and stop_event.is_set():
+                logger.warning("Execução interrompida após clique no gov.br.")
+                fechar_navegador(browser, context, page)
+                break
 
-            etapa = "Criando a subpasta CaixaPostal"
-            pasta_caixa_postal.mkdir(parents=True, exist_ok=True)
-            etapa = "Criando a subpasta Notificacao"
-            pasta_notificacao.mkdir(parents=True, exist_ok=True)
-            etapa = "Criando a subpasta ArquivosBaixados"
-            pasta_arquivos_baixados.mkdir(parents=True, exist_ok=True)
-            time.sleep(DELAY_ENTRE_ACOES_S)
+            if not clicar_botao_certificado_garantido(timeout_segundos=30):
+                logger.error("Erro: Não foi possível localizar 'Seu certificado digital'.")
+                fechar_navegador(browser, context, page)
+                continue
 
-            # --- CAIXA POSTAL ---
-            etapa = "Abrindo a Caixa Postal"
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            card_cp = page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
-            card_cp.wait_for(state="visible", timeout=30000)
-            card_cp.click()
-            time.sleep(2)
-            formatted_dt = datetime.now().strftime("%d%m%Y_%H%M%S")
+            if stop_event and stop_event.is_set():
+                logger.warning("Execução interrompida antes da seleção do certificado.")
+                fechar_navegador(browser, context, page)
+                break
 
-            # 1. Primeiro: clica em 'Exibir apenas não lidas'
-            etapa = "Filtrando por mensagens não lidas"
-            time.sleep(DELAY_ENTRE_ACOES_S)
+            # Seleciona o certificado específico do grupo no popup nativo
+            selecionar_e_confirmar_certificado(termo_busca=cert_alvo, timeout_segundos=25)
+            logger.info(f"Fase 1 concluída: Certificado '{nome_cert_exibicao}' autenticado. Conectando Playwright...")
 
-            loc_nao_lidas_filtro = page.locator(
-                "span:has-text('Exibir apenas não lidas'), "
-                "a:has-text('Exibir apenas não lidas'), "
-                "button:has-text('Exibir apenas não lidas')"
-            ).first
+            # ==================================================================
+            # FASE 2: Conexão Playwright via CDP
+            # ==================================================================
+            playwright_mgr = sync_playwright().start()
 
-            clicou_filtro = False
+            for tentativa_cdp in range(1, 6):
+                if stop_event and stop_event.is_set():
+                    break
+                try:
+                    browser = playwright_mgr.chromium.connect_over_cdp(
+                        f"http://127.0.0.1:{CDP_PORT}",
+                        slow_mo=DELAY_SLOW_MO_MS
+                    )
+                    break
+                except Exception:
+                    time.sleep(2)
+
+            if not browser:
+                logger.error("Erro fatal: Não foi possível conectar o Playwright via CDP após 5 tentativas.")
+                if playwright_mgr:
+                    playwright_mgr.stop()
+                continue
+
+            context = browser.contexts[0]
+            page = context.pages[0] if context.pages else context.new_page()
+
             try:
-                loc_nao_lidas_filtro.wait_for(state="visible", timeout=8000)
-                time.sleep(0.3)
-                loc_nao_lidas_filtro.click()
-                clicou_filtro = True
-                log_etapa(item_id, etapa, "Filtro 'Exibir apenas não lidas' acionado com sucesso.")
-                time.sleep(2)  # Aguarda o Angular carregar a lista filtrada
+                page.wait_for_url("**/servicos**", timeout=45000)
             except Exception:
-                try:
-                    btn_fallback = page.get_by_text("Exibir apenas não lidas", exact=False).first
-                    if btn_fallback.is_visible():
-                        btn_fallback.click()
-                        clicou_filtro = True
-                        log_etapa(item_id, etapa, "Filtro 'Exibir apenas não lidas' acionado via get_by_text.")
-                        time.sleep(2)
-                except Exception:
-                    pass
+                pass
 
-            if clicou_filtro:
-                try:
-                    page.mouse.move(0, 0)
-                except Exception:
-                    pass
-            else:
-                btn_todas = page.locator("span:has-text('Exibir todas'), a:has-text('Exibir todas'), button:has-text('Exibir todas')").first
-                if btn_todas.is_visible():
-                    log_etapa(item_id, etapa, "Filtro de não lidas já está ativo ('Exibir todas' presente).")
-                else:
-                    log_etapa(item_id, etapa, "Aviso: opção 'Exibir apenas não lidas' não foi localizada.")
-
-            # 2. Depois de filtrar: verifica se há mensagens não lidas na tela e tira o print
-            etapa = "Tirando o print da Caixa Postal"
-            time.sleep(0.5)
-
-            # Seletores reais do DOM identificados nas capturas:
-            # - Linha com classe específica: .linha.nao-lida
-            # - Ícone do envelope azul ativo: i.fa-envelope.active
-            # - Linhas da tabela de mensagens: .tabela.mensagens .linha
-            # - Contador numérico na aba superior: Caixa de Entrada (1), Caixa de Entrada (2), etc.
-            loc_nao_lidas = page.locator(
-                ".linha.nao-lida, "
-                ".linha:has(i.fa-envelope.active), "
-                ".linha:has(i.fa-envelope), "
-                "i.fa-envelope.active, "
-                "div[class*='nao-lida']"
-            )
-            loc_contador_aba = page.get_by_text(re.compile(r"Caixa de Entrada\s*\([1-9]\d*\)", re.I))
-            linhas_tabela = page.locator(".tabela.mensagens .linha, .tabela .linha")
-            msg_vazio = (
-                page.locator(".empty-row")
-                .or_(page.get_by_text(re.compile(r"nenhum registro|nenhuma mensagem|não há mensagens", re.I)))
-            )
-            btn_exibir_todas = page.locator("span:has-text('Exibir todas'), a:has-text('Exibir todas'), button:has-text('Exibir todas')")
-
-            tem_msg_nao_lida = False
-            try:
-                # Critério A: Linha com classe nao-lida ou envelope ativo visível
-                if loc_nao_lidas.count() > 0 and loc_nao_lidas.first.is_visible():
-                    tem_msg_nao_lida = True
-                # Critério B: Contador na aba 'Caixa de Entrada (N)' onde N > 0
-                elif loc_contador_aba.count() > 0 and loc_contador_aba.first.is_visible():
-                    tem_msg_nao_lida = True
-                else:
-                    # Critério C: Filtro de não lidas ativo ('Exibir todas' presente) com registros na tabela
-                    filtro_ativo = btn_exibir_todas.count() > 0 and btn_exibir_todas.first.is_visible()
-                    tabela_tem_linhas = linhas_tabela.count() > 0 and linhas_tabela.first.is_visible()
-                    tabela_vazia = msg_vazio.count() > 0 and msg_vazio.first.is_visible()
-
-                    if (filtro_ativo or clicou_filtro) and tabela_tem_linhas and not tabela_vazia:
-                        tem_msg_nao_lida = True
-                    else:
-                        try:
-                            loc_nao_lidas.first.wait_for(state="visible", timeout=3000)
-                            tem_msg_nao_lida = True
-                        except PlaywrightTimeoutError:
-                            tem_msg_nao_lida = False
-            except Exception as e:
-                logger.warning(f"Erro ao verificar mensagens não lidas: {e}")
-                tem_msg_nao_lida = False
-
-            if tem_msg_nao_lida:
-                time.sleep(DELAY_ENTRE_ACOES_S)
-
-                # Afasta o cursor do mouse para não ativar tooltips e remove balões visuais residuais
-                try:
-                    page.mouse.move(0, 0)
-                    time.sleep(0.6)  # Aguarda o fade-out natural do tooltip
-                    page.evaluate("""() => {
-                        const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
-                        tooltips.forEach(t => t.remove());
-                    }""")
-                except Exception:
-                    pass
-
-                caminho_print_cp = pasta_caixa_postal / f"{item_id}_{formatted_dt}.jpg"
-                page.screenshot(path=str(caminho_print_cp), type="jpeg")
-                log_etapa(item_id, etapa, "Print da Caixa Postal realizado com sucesso (mensagem não lida encontrada após filtro).")
-                time.sleep(DELAY_ENTRE_ACOES_S)
-            else:
-                log_etapa(item_id, etapa, "Nenhuma mensagem não lida encontrada na Caixa Postal.")
-
-            # Volta para a tela de Serviços
+            card_caixa_postal = page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
+            card_caixa_postal.wait_for(state="visible", timeout=30000)
             time.sleep(DELAY_ENTRE_ACOES_S)
-            btn_voltar = page.locator("a:has-text('Serviços'), button:has-text('Voltar'), i.fa-arrow-left, i.fa-home").first
-            if btn_voltar.is_visible():
-                btn_voltar.click()
-            else:
-                page.goto(URL_SERVICOS, timeout=60000)
-            time.sleep(DELAY_ENTRE_ACOES_S)
+            logger.info(f"Fase 2 estabelecida: Sessão ativa para certificado '{nome_cert_exibicao}'!")
 
-            # --- NOTIFICAÇÃO ---
-            etapa = "Abrindo a tela de Notificação"
-            card_notificacao = page.locator(".cardListItem:has(span.title:has-text('NOTIFICAÇÃO'))")
-            card_notificacao.wait_for(state="visible", timeout=60000)
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            card_notificacao.click()
-            time.sleep(DELAY_ENTRE_ACOES_S)
-
-            etapa = "Tirando o print da Notificação"
-            linhas_notif = page.locator("ngx-datatable datatable-row-wrapper")
-            try:
-                linhas_notif.first.wait_for(state="visible", timeout=10000)
-                tem_notificacoes = True
-            except PlaywrightTimeoutError:
-                tem_notificacoes = False
-
-            etapa = "Lendo a lista de notificações"
-            if tem_notificacoes:
-                qtd_linhas = linhas_notif.count()
-                log_etapa(
-                    item_id,
-                    etapa,
-                    f"Lista de notificações lida: {qtd_linhas} linha(s) extraída(s). Data de hoje considerada: {hoje_date.strftime('%d/%m/%Y')}",
-                )
-
-                dados_linhas = []
-                existe_notificacao_valida = False
-
-                for idx in range(qtd_linhas):
-                    row_loc = linhas_notif.nth(idx)
-
-                    # Busca a data dinamicamente nas células da linha (suporta diferentes ordens de coluna)
-                    texto_data = ""
-                    todas_celulas = row_loc.locator("datatable-body-cell").all()
-                    for cell in todas_celulas:
-                        c_txt = cell.inner_text().strip()
-                        m = re.search(r"\b(\d{2}/\d{2}/\d{2,4})\b", c_txt)
-                        if m:
-                            texto_data = m.group(1)
-                            break
-
-                    if not texto_data and len(todas_celulas) > 5:
-                        try:
-                            texto_data = todas_celulas[5].inner_text().strip()
-                        except Exception:
-                            pass
-
-                    # Valida formato da data (aceita ano com 4 dígitos %d/%m/%Y ou com 2 dígitos %d/%m/%y como 17/12/20)
-                    data_notif = None
-                    valida = False
-                    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
-                        try:
-                            data_notif = datetime.strptime(texto_data, fmt).date()
-                            break
-                        except ValueError:
-                            pass
-
-                    if data_notif:
-                        valida = (data_notif <= hoje_date) if MODO_TESTE else (data_notif >= hoje_date)
-
-                    if valida:
-                        existe_notificacao_valida = True
-                    dados_linhas.append((idx, texto_data, valida))
-
-                if not existe_notificacao_valida:
-                    log_etapa(item_id, etapa, "Nenhuma notificação possui data válida e o print foi ignorado.")
-
-                # Processa cada linha da lista de notificações
-                for idx, texto_data, linha_valida in dados_linhas:
-                    etapa = f"Lendo a data da linha {idx}"
-                    if linha_valida:
-                        row_loc = linhas_notif.nth(idx)
-
-                        etapa = f"Rolando a página até a linha {idx}"
-                        row_loc.scroll_into_view_if_needed()
-                        time.sleep(DELAY_ENTRE_ACOES_S)
-
-                        # Print recortado da linha da notificação
-                        etapa = f"Tirando print recortado da linha {idx}"
-                        caminho_print_linha = pasta_notificacao / f"{item_id}_linha_{idx}_{formatted_dt}.jpg"
-                        row_loc.screenshot(path=str(caminho_print_linha), type="jpeg")
-                        time.sleep(DELAY_ENTRE_ACOES_S)
-                        log_etapa(
-                            item_id,
-                            etapa,
-                            f"Print recortado da linha {idx} (data {texto_data}) realizado com sucesso.",
-                        )
-
-                        # Download do anexo caso disponível (suporta múltiplas linhas e ícones fa-print / fa-download)
-                        etapa = f"Localizando o botão de download da linha {idx}"
-                        candidatos_download = row_loc.locator(
-                            "button:has(i.fa-download), a:has(i.fa-download), "
-                            "button:has(i.fa-print), a:has(i.fa-print), "
-                            "button[title*='Download'], button[title*='Baixar'], button[title*='Imprimir']"
-                        )
-                        btn_download = None
-                        if candidatos_download.count() > 0:
-                            btn_download = candidatos_download.first
-                        else:
-                            celula_acoes = row_loc.locator("datatable-body-cell").last
-                            botoes_acoes = celula_acoes.locator("button, a")
-                            if botoes_acoes.count() > 1:
-                                btn_download = botoes_acoes.nth(1)
-                            elif botoes_acoes.count() == 1:
-                                btn_download = botoes_acoes.first
-
-                        if btn_download and btn_download.count() > 0 and btn_download.is_visible():
-                            log_etapa(item_id, etapa, f"Linha {idx} (data {texto_data}): clicando no botão de download")
-                            try:
-                                etapa = f"Aguardando o download da linha {idx}"
-                                time.sleep(DELAY_ENTRE_ACOES_S)
-                                with page.expect_download(timeout=60000) as download_info:
-                                    btn_download.click()
-                                    log_etapa(item_id, etapa, f"Linha {idx}: clique no botão de download realizado")
-
-                                download = download_info.value
-                                sug_name = download.suggested_filename
-                                destino_final = pasta_arquivos_baixados / sug_name
-                                # Se já existir arquivo com mesmo nome (múltiplas linhas baixando mesmo nome), diferencia pelo índice
-                                if destino_final.exists():
-                                    stem = destino_final.stem
-                                    ext = destino_final.suffix
-                                    destino_final = pasta_arquivos_baixados / f"{stem}_linha_{idx}{ext}"
-
-                                download.save_as(str(destino_final))
-                                time.sleep(DELAY_ENTRE_ACOES_S)
-                                log_etapa(
-                                    item_id,
-                                    etapa,
-                                    f"Linha {idx}: arquivo baixado e movido para ArquivosBaixados ({destino_final.name})",
-                                )
-                            except PlaywrightTimeoutError:
-                                log_etapa(
-                                    item_id,
-                                    etapa,
-                                    f"AVISO: download não detectado em 60s (linha {idx})",
-                                )
-                        else:
-                            log_etapa(
-                                item_id,
-                                etapa,
-                                f"Linha {idx} (data {texto_data}): notificação válida sem botão de download (apenas leitura).",
-                            )
-                    else:
-                        log_etapa(
-                            item_id,
-                            etapa,
-                            f"Linha {idx} ignorada: data {texto_data} fora do critério (ModoTeste={MODO_TESTE}, hoje={hoje_date.strftime('%d/%m/%Y')})",
-                        )
-            else:
-                log_etapa(item_id, etapa, "Nenhuma notificação listada na tela de Notificação")
-
-            # Retorna à tela de serviços
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            page.goto(URL_SERVICOS, timeout=60000)
-            time.sleep(DELAY_ENTRE_ACOES_S)
-
-            # Limpeza de diretórios vazios e contabilização
-            etapa = "Limpando subpastas vazias"
-            remover_pastas_vazias_do_item(pasta_item)
-
-            etapa = "Conferindo os arquivos e limpando a pasta vazia"
-            arquivos_guardados = list(pasta_item.rglob("*")) if pasta_item.exists() else []
-            qtd_arquivos = sum(1 for f in arquivos_guardados if f.is_file())
-
-            logger.info(
-                f"SUCESSO: O item '{item_id}' foi verificado. Arquivos guardados (prints + downloads): {qtd_arquivos}"
-            )
+            # ==================================================================
+            # FASE 3: Loop de CNPJs deste certificado
+            # ==================================================================
+            perfil_ref = [0]
             falhas_seguidas = 0
 
-        except Exception as e:
-            falhas_seguidas += 1
-            logger.error(f"Erro no item '{current_item}' na etapa '{etapa}': {e}")
-            try:
-                page.goto(URL_SERVICOS, timeout=60000)
-            except Exception:
-                pass
+            for current_item in lista_cnpjs:
+                if stop_event and stop_event.is_set():
+                    logger.warning("Execução cancelada pelo usuário.")
+                    break
+
+                if falhas_seguidas >= 3:
+                    logger.error(
+                        f"3 falhas seguidas no grupo '{nome_cert_exibicao}'. Interrompendo itens restantes deste certificado."
+                    )
+                    break
+
+                item_id = current_item.strip()
+                if not item_id:
+                    continue
+
+                item_global_idx += 1
+                if progress_callback:
+                    progress_callback(
+                        item_global_idx - 1,
+                        total_itens,
+                        f"Processando {item_global_idx}/{total_itens} ({item_id}) [Cert: {nome_cert_exibicao[:20]}]",
+                    )
+
+                sucesso = processar_item_det(
+                    page=page,
+                    item_id=item_id,
+                    idx_item=item_global_idx,
+                    total_itens=total_itens,
+                    screenshots_dir=screenshots_dir,
+                    hoje_date=hoje_date,
+                    perfil_ref=perfil_ref,
+                    progress_callback=progress_callback,
+                    stop_event=stop_event,
+                )
+
+                if sucesso:
+                    falhas_seguidas = 0
+                else:
+                    falhas_seguidas += 1
+
+                if progress_callback:
+                    progress_callback(
+                        item_global_idx,
+                        total_itens,
+                        f"Item {item_global_idx}/{total_itens} finalizado ({item_id})",
+                    )
+
+        except Exception as e_grupo:
+            logger.error(f"Erro no processamento do grupo de certificado '{nome_cert_exibicao}': {e_grupo}")
+
         finally:
-            if progress_callback:
-                progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} finalizado")
+            # ==================================================================
+            # FASE 4: Logout do DET e Fechamento Limpo do Chrome deste grupo
+            # ==================================================================
+            if page and not page.is_closed():
+                efetuar_logout_det(page)
 
-    # ==========================================================================
-    # 4. Encerramento, Logout e Fechamento do Navegador
-    # ==========================================================================
-    try:
-        time.sleep(DELAY_ENTRE_ACOES_S)
-        logger.info("Finalizando execução. Efetuando logout no sistema...")
+            logger.info(f"Fechando sessão do Chrome para certificado '{nome_cert_exibicao}'...")
+            fechar_navegador(browser, context, page)
+            if playwright_mgr:
+                try:
+                    playwright_mgr.stop()
+                except Exception:
+                    pass
+            time.sleep(2)
 
-        btn_sair = page.locator("br-button:has-text('Sair'), button:has-text('Sair'), a:has-text('Sair')").first
-        if not btn_sair.is_visible():
-            btn_sair = page.get_by_text(re.compile(r"^\s*Sair\s*$", re.IGNORECASE)).first
+    logger.info("Automação de todos os certificados e CNPJs finalizada com sucesso.")
 
-        if btn_sair.is_visible():
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            btn_sair.click()
-            logger.info("Clique no botão 'Sair' realizado.")
-            time.sleep(DELAY_ENTRE_ACOES_S)
 
-            btn_confirmar = page.locator("button:has-text('Sim'), button:has-text('Confirmar'), br-button:has-text('Sim')").first
-            try:
-                if btn_confirmar.is_visible(timeout=2000):
-                    btn_confirmar.click()
-                    time.sleep(DELAY_ENTRE_ACOES_S)
-            except Exception:
-                pass
-
-            time.sleep(1.5)
-        else:
-            logger.info("Botão 'Sair' não localizado no cabeçalho.")
-    except Exception as e:
-        logger.warning(f"Aviso durante tentativa de logout: {e}")
-
-    for arq in arquivos_pendentes_excluir:
-        try:
-            Path(arq).unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    logger.info("Fechando o navegador Chrome...")
-    fechar_navegador(browser, context, page)
-    if playwright_mgr:
-        playwright_mgr.stop()
-    logger.info("Automação finalizada com sucesso.")
 
 
 if __name__ == "__main__":
