@@ -415,13 +415,13 @@ def selecionar_e_confirmar_certificado(termo_busca: str = "", timeout_segundos: 
                         logger.info(f"[CERTIFICADO] Certificado '{termo_str}' não visível de imediato. Percorrendo lista com rolagem (seta para baixo)...")
                         send_keys("{HOME}")
                         time.sleep(0.4)
-                        for passo in range(25):  # Suporta até 25+ certificados
+                        for passo in range(50):  # Suporta até 50 certificados
                             item_alvo = buscar_item_na_arvore()
                             if item_alvo:
                                 logger.info(f"[CERTIFICADO] Certificado localizado após rolagem no passo {passo + 1}!")
                                 break
                             send_keys("{DOWN}")
-                            time.sleep(0.2)
+                            time.sleep(0.15)
 
                     if item_alvo:
                         logger.info(f"[CERTIFICADO] Item correspondente encontrado via UIA: '{item_alvo.window_text()}'! Clicando...")
@@ -431,7 +431,20 @@ def selecionar_e_confirmar_certificado(termo_busca: str = "", timeout_segundos: 
                         except Exception as e_click:
                             logger.warning(f"[CERTIFICADO] Falha no click_input direto: {e_click}. Tentando via ENTER...")
                     else:
-                        logger.warning(f"[CERTIFICADO] AVISO: Certificado '{termo_str}' não foi encontrado na lista. Mantendo seleção atual.")
+                        logger.error(
+                            f"[CERTIFICADO] ERRO: Certificado '{termo_str}' NÃO foi localizado no Windows (verificados até 50 itens). "
+                            "Cancelando seleção para evitar login com certificado incorreto."
+                        )
+                        try:
+                            btns_cancelar = janela_cert.descendants(control_type="Button", title="Cancelar")
+                            if btns_cancelar:
+                                btns_cancelar[0].click_input()
+                            else:
+                                send_keys("{ESC}")
+                        except Exception:
+                            send_keys("{ESC}")
+                        time.sleep(1.5)
+                        return False
 
                 # Captura screenshot de depuração para confirmação visual da seleção (fundo azul)
                 try:
@@ -470,6 +483,10 @@ def selecionar_e_confirmar_certificado(termo_busca: str = "", timeout_segundos: 
         time.sleep(0.8)
 
     # Fallback final se o loop acima esgotar
+    if termo_str:
+        logger.error(f"[CERTIFICADO] Timeout ao aguardar popup para seleção do certificado '{termo_str}'. Abortando.")
+        return False
+
     logger.info("[FASE 1 - SO] Fallback: chamando confirmar_popup_certificado padrão...")
     return confirmar_popup_certificado(timeout_segundos=10)
 
@@ -1092,7 +1109,22 @@ def executar_robo_hibrido(
                 break
 
             # Seleciona o certificado específico do grupo no popup nativo
-            selecionar_e_confirmar_certificado(termo_busca=cert_alvo, timeout_segundos=25)
+            sucesso_cert = selecionar_e_confirmar_certificado(termo_busca=cert_alvo, timeout_segundos=25)
+            if not sucesso_cert:
+                logger.error(
+                    f"\n[ATENÇÃO] O certificado '{nome_cert_exibicao}' NÃO foi localizado ou não está instalado no Windows. "
+                    f"Todos os {len(lista_cnpjs)} CNPJ(s) associados a este grupo foram ignorados."
+                )
+                item_global_idx += len(lista_cnpjs)
+                if progress_callback:
+                    progress_callback(
+                        item_global_idx,
+                        total_itens,
+                        f"Grupo {num_grupo}/{total_grupos} ignorado (Certificado '{nome_cert_exibicao[:20]}' não encontrado)",
+                    )
+                fechar_navegador(browser, context, page)
+                continue
+
             logger.info(f"Fase 1 concluída: Certificado '{nome_cert_exibicao}' autenticado. Conectando Playwright...")
 
             # ==================================================================
