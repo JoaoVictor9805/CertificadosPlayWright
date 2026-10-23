@@ -858,25 +858,152 @@ def processar_item_det(
 
             if not existe_notificacao_valida:
                 log_etapa(item_id, etapa, "Nenhuma notificação possui data válida e o print foi ignorado.")
+            else:
+                # --- CAPTURA DE PRINTS DE TELA INTEIRA (SEM DUPLICAÇÃO) ---
+                etapa = "Tirando prints da tela de Notificações"
+                indices_validos = [idx for idx, _, val in dados_linhas if val]
+                linhas_ja_capturadas = set()
+
+                # 1. Primeiro print: Tela inicial no topo (mostrando dados do Empregador, Usuário e filtros)
+                try:
+                    page.evaluate("window.scrollTo(0, 0)")
+                except Exception:
+                    pass
+                time.sleep(DELAY_ENTRE_ACOES_S)
+
+                # Remove tooltips / popovers antes do print
+                try:
+                    page.mouse.move(0, 0)
+                    time.sleep(0.3)
+                    page.evaluate("""() => {
+                        const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                        tooltips.forEach(t => t.remove());
+                    }""")
+                except Exception:
+                    pass
+
+                caminho_print_1 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte1.jpg"
+                page.screenshot(path=str(caminho_print_1), type="jpeg")
+                log_etapa(
+                    item_id,
+                    etapa,
+                    f"Print #1 da tela inteira (topo com identificação do Empregador) realizado com sucesso ({caminho_print_1.name}).",
+                )
+                time.sleep(DELAY_ENTRE_ACOES_S)
+
+                # 2. Segundo print: Rola até a primeira notificação (ou cabeçalho) para posicioná-la no topo
+                try:
+                    topo_notif = page.locator("h1:has-text('Notificações'), h2:has-text('Notificações'), h3:has-text('Notificações'), ngx-datatable").first
+                    if topo_notif.count() > 0 and topo_notif.is_visible():
+                        topo_notif.evaluate("el => el.scrollIntoView({ block: 'start' })")
+                    elif linhas_notif.count() > 0:
+                        linhas_notif.first.evaluate("el => el.scrollIntoView({ block: 'start' })")
+                except Exception:
+                    try:
+                        linhas_notif.first.scroll_into_view_if_needed()
+                    except Exception:
+                        pass
+
+                time.sleep(DELAY_ENTRE_ACOES_S)
+
+                try:
+                    page.mouse.move(0, 0)
+                    time.sleep(0.3)
+                    page.evaluate("""() => {
+                        const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                        tooltips.forEach(t => t.remove());
+                    }""")
+                except Exception:
+                    pass
+
+                # Identifica quais linhas ficaram visíveis neste segundo print a partir do topo das notificações
+                try:
+                    linhas_visiveis = page.evaluate("""() => {
+                        const rows = Array.from(document.querySelectorAll('ngx-datatable datatable-row-wrapper'));
+                        const vh = window.innerHeight;
+                        const vis = [];
+                        rows.forEach((r, i) => {
+                            const rect = r.getBoundingClientRect();
+                            const hVis = Math.min(rect.bottom, vh) - Math.max(rect.top, 0);
+                            if (hVis > 50 && rect.top < vh && rect.bottom > 0) {
+                                vis.push(i);
+                            }
+                        });
+                        return vis;
+                    }""")
+                    linhas_ja_capturadas.update(linhas_visiveis)
+                except Exception:
+                    linhas_ja_capturadas.add(0)
+
+                # Tira o print com a tabela rolada para o topo
+                caminho_print_2 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte2.jpg"
+                page.screenshot(path=str(caminho_print_2), type="jpeg")
+                log_etapa(
+                    item_id,
+                    etapa,
+                    f"Print #2 da tela inteira (rolado até as notificações) realizado com sucesso ({caminho_print_2.name}), cobrindo linha(s): {sorted(list(linhas_ja_capturadas))}.",
+                )
+                time.sleep(DELAY_ENTRE_ACOES_S)
+
+                # 3. Se houver notificações válidas mais abaixo que ainda não apareceram no print rolado, vai descendo
+                num_print = 3
+                for idx in indices_validos:
+                    if idx in linhas_ja_capturadas:
+                        continue
+
+                    row_loc = linhas_notif.nth(idx)
+                    try:
+                        row_loc.evaluate("el => el.scrollIntoView({ block: 'start' })")
+                    except Exception:
+                        row_loc.scroll_into_view_if_needed()
+                    time.sleep(DELAY_ENTRE_ACOES_S)
+
+                    try:
+                        page.mouse.move(0, 0)
+                        time.sleep(0.3)
+                        page.evaluate("""() => {
+                            const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                            tooltips.forEach(t => t.remove());
+                        }""")
+                    except Exception:
+                        pass
+
+                    try:
+                        linhas_visiveis = page.evaluate("""() => {
+                            const rows = Array.from(document.querySelectorAll('ngx-datatable datatable-row-wrapper'));
+                            const vh = window.innerHeight;
+                            const vis = [];
+                            rows.forEach((r, i) => {
+                                const rect = r.getBoundingClientRect();
+                                const hVis = Math.min(rect.bottom, vh) - Math.max(rect.top, 0);
+                                if (hVis > 50 && rect.top < vh && rect.bottom > 0) {
+                                    vis.push(i);
+                                }
+                            });
+                            return vis;
+                        }""")
+                        linhas_ja_capturadas.update(linhas_visiveis)
+                    except Exception:
+                        linhas_ja_capturadas.add(idx)
+
+                    caminho_print_n = pasta_notificacao / f"{item_id}_{formatted_dt}_parte{num_print}.jpg"
+                    page.screenshot(path=str(caminho_print_n), type="jpeg")
+                    log_etapa(
+                        item_id,
+                        etapa,
+                        f"Print #{num_print} da tela inteira realizado descendo até a linha {idx} ({caminho_print_n.name}), cobrindo linha(s): {sorted(list(linhas_ja_capturadas))}.",
+                    )
+                    num_print += 1
+                    time.sleep(DELAY_ENTRE_ACOES_S)
 
             for idx, texto_data, linha_valida in dados_linhas:
                 etapa = f"Lendo a data da linha {idx}"
                 if linha_valida:
                     row_loc = linhas_notif.nth(idx)
 
-                    etapa = f"Rolando a página até a linha {idx}"
+                    etapa = f"Rolando a página até a linha {idx} para download"
                     row_loc.scroll_into_view_if_needed()
                     time.sleep(DELAY_ENTRE_ACOES_S)
-
-                    etapa = f"Tirando print recortado da linha {idx}"
-                    caminho_print_linha = pasta_notificacao / f"{item_id}_linha_{idx}_{formatted_dt}.jpg"
-                    row_loc.screenshot(path=str(caminho_print_linha), type="jpeg")
-                    time.sleep(DELAY_ENTRE_ACOES_S)
-                    log_etapa(
-                        item_id,
-                        etapa,
-                        f"Print recortado da linha {idx} (data {texto_data}) realizado com sucesso.",
-                    )
 
                     etapa = f"Localizando o botão de download da linha {idx}"
                     candidatos_download = row_loc.locator(
