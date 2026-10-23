@@ -18,6 +18,7 @@ from typing import Optional, Callable
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from PIL import Image
 
 import openpyxl
 import pyautogui
@@ -84,7 +85,14 @@ else:
 IMG_GOVBR = IMG_DIR / "EntrarComGov.png"
 IMG_CERT = IMG_DIR / "SeuCertificadoDigital.png"
 IMG_OK = IMG_DIR / "Ok.png"
+IMG_CAPTCHA_AVANCAR = IMG_DIR / "CaptchaAvancar.png"
+IMG_CAPTCHA_HAND = IMG_DIR / "CaptchaHand.png"
 IMG_DEBUG_ERRO = IMG_DIR / "debug_tela_erro.png"
+
+
+class CaptchaDetectadoException(Exception):
+    """Exceção levantada quando um desafio hCaptcha é detectado durante o login gov.br."""
+    pass
 
 # ==============================================================================
 # LOGGER DA APLICAÇÃO (RoboDET)
@@ -119,6 +127,22 @@ def liberar_porta_se_ocupada():
         except Exception:
             pass
 
+        # Se ainda estiver em uso, tenta fechar a janela via UIA
+        if porta_em_uso(CDP_PORT):
+            try:
+                desktop = Desktop(backend="uia")
+                for win in desktop.windows():
+                    cls = win.class_name()
+                    txt = win.window_text()
+                    if cls == "Chrome_WidgetWin_1" and any(k in txt for k in ["Chrome", "DET", "gov.br"]):
+                        win.close()
+            except Exception:
+                pass
+            time.sleep(1)
+
+
+CHROME_PROC: Optional[subprocess.Popen] = None
+
 
 def iniciar_chrome_hibrido():
     """
@@ -126,6 +150,7 @@ def iniciar_chrome_hibrido():
     O Playwright NÃO é conectado durante a inicialização, evitando qualquer flag ou
     sinalização de automação no gov.br.
     """
+    global CHROME_PROC
     CHROME_USER_DATA.mkdir(parents=True, exist_ok=True)
     cmd = [
         CHROME_PATH,
@@ -137,7 +162,7 @@ def iniciar_chrome_hibrido():
         "--disable-blink-features=AutomationControlled",
         URL_LOGIN,
     ]
-    subprocess.Popen(cmd)
+    CHROME_PROC = subprocess.Popen(cmd)
     for _ in range(20):
         if porta_em_uso(CDP_PORT):
             break
@@ -206,6 +231,70 @@ def localizar_imagem(caminho_imagem: Path, confidence: float = 0.8):
     return None
 
 
+def detectar_presenca_captcha() -> bool:
+    """
+    Verifica se o desafio hCaptcha surgiu na tela após clicar em 'Seu certificado digital'
+    (ou durante a autenticação gov.br).
+    Utiliza 3 métodos complementares para máxima confiabilidade e velocidade:
+    1. Detecção cromática por contagem de pixels na cor turquesa/teal (#028490) do hCaptcha.
+    2. Correspondência de imagem PyAutoGUI (botão 'Avançar' ou ícone da mãozinha).
+    3. Inspeção UIA no Windows procurando por elementos típicos do desafio hCaptcha.
+    """
+    # 1. Detecção cromática via screenshot (instantânea e imune a variações do texto da instrução)
+    try:
+        shot = pyautogui.screenshot()
+        w, h = shot.size
+        # Foca na região central da tela onde o card flutuante do hCaptcha é renderizado
+        box = (int(w * 0.15), int(h * 0.05), int(w * 0.85), int(h * 0.95))
+        cropped = shot.crop(box)
+        teal_count = 0
+        for p in cropped.get_flattened_data():
+            # R < 40, 95 < G < 155, 110 < B < 170 (cor sólida da barra superior do hCaptcha)
+            if p[0] < 40 and 95 < p[1] < 155 and 110 < p[2] < 170:
+                teal_count += 1
+                if teal_count >= 1500:
+                    logger.warning(
+                        f"[CAPTCHA] Desafio hCaptcha detectado por padrão cromático ({teal_count} pixels turquesa identificados)!"
+                    )
+                    return True
+    except Exception as e_cor:
+        logger.debug(f"Erro na checagem cromática de captcha: {e_cor}")
+
+    # 2. Correspondência de imagem (botão Avançar ou ícone de acessibilidade do hCaptcha)
+    try:
+        if IMG_CAPTCHA_AVANCAR.exists():
+            pos_avancar = localizar_imagem(IMG_CAPTCHA_AVANCAR, confidence=0.75)
+            if pos_avancar:
+                logger.warning(f"[CAPTCHA] Desafio hCaptcha detectado pelo botão 'Avançar' em ({pos_avancar.x}, {pos_avancar.y})!")
+                return True
+        if IMG_CAPTCHA_HAND.exists():
+            pos_hand = localizar_imagem(IMG_CAPTCHA_HAND, confidence=0.75)
+            if pos_hand:
+                logger.warning(f"[CAPTCHA] Desafio hCaptcha detectado pelo ícone da mãozinha em ({pos_hand.x}, {pos_hand.y})!")
+                return True
+    except Exception as e_img:
+        logger.debug(f"Erro na checagem por imagem de captcha: {e_img}")
+
+    # 3. Fallback UIA no Windows
+    try:
+        desktop = Desktop(backend="uia")
+        for win in desktop.windows():
+            titulo = win.window_text().lower()
+            if any(k in titulo for k in ["gov.br", "acesse sua conta", "chrome"]):
+                for desc in win.descendants():
+                    txt = (desc.window_text() or desc.element_info.name or "").lower()
+                    if any(term in txt for term in ["clique nos itens", "clique em cada", "hcaptcha", "desafio"]):
+                        logger.warning(f"[CAPTCHA] Desafio hCaptcha detectado via UIA pelo texto: '{txt}'!")
+                        return True
+                    if desc.element_info.control_type == "Button" and txt in ["avançar", "avancar", "verificar"]:
+                        logger.warning(f"[CAPTCHA] Desafio hCaptcha detectado via UIA pelo botão: '{txt}'!")
+                        return True
+    except Exception:
+        pass
+
+    return False
+
+
 def clicar_botao_govbr_garantido(timeout_segundos: int = 25) -> bool:
     """
     Localiza e clica no botão 'Entrar com gov.br', garantindo que o clique
@@ -237,6 +326,7 @@ def clicar_botao_certificado_garantido(timeout_segundos: int = 30) -> bool:
     """
     Aguarda e clica em 'Seu certificado digital' na tela do sso.acesso.gov.br.
     Se demorar, realiza uma leve rolagem na página para garantir visibilidade.
+    Se detectar captcha, levanta CaptchaDetectadoException imediatamente.
     """
     logger.info(f"[FASE 1 - SO] Procurando 'Seu certificado digital' na tela (timeout={timeout_segundos}s)...")
     fim = time.time() + timeout_segundos
@@ -244,12 +334,18 @@ def clicar_botao_certificado_garantido(timeout_segundos: int = 30) -> bool:
 
     while time.time() < fim:
         tentativa += 1
+
+        if detectar_presenca_captcha():
+            raise CaptchaDetectadoException("hCaptcha detectado na tela de autenticação gov.br.")
+
         pos = localizar_imagem(IMG_CERT, confidence=0.75)
         if pos:
             logger.info(f"[FASE 1 - SO] 'Seu certificado digital' ENCONTRADO em ({pos.x}, {pos.y})! Clicando...")
             clicar_robusto(pos.x, pos.y)
             # Delay estendido para dar tempo ao Windows/Chrome de carregar a lista de certificados
             time.sleep(2.5)
+            if detectar_presenca_captcha():
+                raise CaptchaDetectadoException("hCaptcha detectado logo após clicar em 'Seu certificado digital'.")
             return True
 
         if tentativa % 6 == 0:
@@ -286,6 +382,9 @@ def confirmar_popup_certificado(timeout_segundos: int = 25) -> bool:
 
     while time.time() < fim:
         tentativa += 1
+
+        if detectar_presenca_captcha():
+            raise CaptchaDetectadoException("hCaptcha detectado durante confirmação do popup de certificado.")
 
         # 1. Tenta por imagem (PyAutoGUI)
         pos_ok = localizar_imagem(IMG_OK, confidence=0.7)
@@ -365,6 +464,10 @@ def selecionar_e_confirmar_certificado(termo_busca: str = "", timeout_segundos: 
 
     while time.time() < fim:
         tentativa += 1
+
+        if detectar_presenca_captcha():
+            raise CaptchaDetectadoException("hCaptcha detectado durante o aguardo do popup de certificado.")
+
         try:
             desktop = Desktop(backend="uia")
             janela_cert = None
@@ -489,22 +592,61 @@ def selecionar_e_confirmar_certificado(termo_busca: str = "", timeout_segundos: 
 
 def fechar_navegador(browser=None, context=None, page=None):
     """
-    Fecha a janela do Chrome real via comando CDP 'Browser.close'
-    e encerra a sessão do Playwright de forma limpa.
+    Fecha a janela do Chrome real e encerra todas as conexões
+    de forma limpa e garantida, seja via Playwright, CDP, UIA ou processo.
     """
+    global CHROME_PROC
+
+    # 1. Encerramento via Playwright / CDP se ativos
     try:
         if context and page and not page.is_closed():
             cdp = context.new_cdp_session(page)
             cdp.send("Browser.close")
-            time.sleep(1)
+            time.sleep(0.8)
     except Exception:
         pass
 
     try:
         if browser:
             browser.close()
+            time.sleep(0.4)
     except Exception:
         pass
+
+    # 2. Encerramento via CDP direto se porta ainda ocupada
+    if porta_em_uso(CDP_PORT):
+        liberar_porta_se_ocupada()
+
+    # 3. Encerramento via processo Popen
+    if CHROME_PROC is not None:
+        try:
+            CHROME_PROC.terminate()
+            CHROME_PROC.wait(timeout=2)
+        except Exception:
+            try:
+                CHROME_PROC.kill()
+            except Exception:
+                pass
+        CHROME_PROC = None
+
+    # 4. Encerramento via fechamento de janela UIA se ainda existir
+    try:
+        desktop = Desktop(backend="uia")
+        for win in desktop.windows():
+            cls = win.class_name()
+            txt = win.window_text()
+            if cls == "Chrome_WidgetWin_1" and any(k in txt for k in ["Chrome", "DET", "gov.br"]):
+                win.close()
+    except Exception:
+        pass
+
+    # Aguarda liberação completa da porta CDP
+    for _ in range(6):
+        if not porta_em_uso(CDP_PORT):
+            break
+        time.sleep(0.5)
+
+    time.sleep(0.5)
 
 
 def limpar_ou_criar_pasta(caminho: Path):
@@ -1334,56 +1476,101 @@ def executar_robo_hibrido(
 
         try:
             # ==================================================================
-            # FASE 1: Login via Sistema Operacional (Chrome Híbrido)
+            # FASE 1: Login via Sistema Operacional (Chrome Híbrido com Retry contra Captcha)
             # ==================================================================
-            logger.info("Iniciando Fase 1: Abertura do Chrome e Login Físico via Sistema...")
-            liberar_porta_se_ocupada()
-            iniciar_chrome_hibrido()
+            MAX_TENTATIVAS_LOGIN = 5
+            sucesso_fase1 = False
 
-            chrome_win = obter_janela_chrome(timeout_segundos=30)
-            focar_janela_segura(chrome_win)
-            time.sleep(2)
+            for tentativa_login in range(1, MAX_TENTATIVAS_LOGIN + 1):
+                if stop_event and stop_event.is_set():
+                    logger.warning("Execução interrompida pelo usuário antes do login.")
+                    break
 
-            if stop_event and stop_event.is_set():
-                logger.warning("Execução interrompida antes do login.")
-                fechar_navegador(browser, context, page)
-                break
-
-            if not clicar_botao_govbr_garantido(timeout_segundos=25):
-                logger.error("Erro: Não foi possível localizar o botão 'Entrar com gov.br'.")
-                fechar_navegador(browser, context, page)
-                continue
-
-            if stop_event and stop_event.is_set():
-                logger.warning("Execução interrompida após clique no gov.br.")
-                fechar_navegador(browser, context, page)
-                break
-
-            if not clicar_botao_certificado_garantido(timeout_segundos=30):
-                logger.error("Erro: Não foi possível localizar 'Seu certificado digital'.")
-                fechar_navegador(browser, context, page)
-                continue
-
-            if stop_event and stop_event.is_set():
-                logger.warning("Execução interrompida antes da seleção do certificado.")
-                fechar_navegador(browser, context, page)
-                break
-
-            # Seleciona o certificado específico do grupo no popup nativo
-            sucesso_cert = selecionar_e_confirmar_certificado(termo_busca=cert_alvo, timeout_segundos=25)
-            if not sucesso_cert:
-                logger.error(
-                    f"\n[ATENÇÃO] O certificado '{nome_cert_exibicao}' NÃO foi localizado ou não está instalado no Windows. "
-                    f"Todos os {len(lista_cnpjs)} CNPJ(s) associados a este grupo foram ignorados."
+                logger.info(
+                    f"\n>>> Fase 1 (Tentativa {tentativa_login}/{MAX_TENTATIVAS_LOGIN}): "
+                    f"Abertura do Chrome e Login gov.br para certificado '{nome_cert_exibicao}'..."
                 )
-                item_global_idx += len(lista_cnpjs)
-                if progress_callback:
-                    progress_callback(
-                        item_global_idx,
-                        total_itens,
-                        f"Grupo {num_grupo}/{total_grupos} ignorado (Certificado '{nome_cert_exibicao[:20]}' não encontrado)",
-                    )
                 fechar_navegador(browser, context, page)
+                liberar_porta_se_ocupada()
+                iniciar_chrome_hibrido()
+
+                try:
+                    chrome_win = obter_janela_chrome(timeout_segundos=30)
+                    focar_janela_segura(chrome_win)
+                    time.sleep(2)
+
+                    if stop_event and stop_event.is_set():
+                        logger.warning("Execução interrompida antes do login.")
+                        fechar_navegador(browser, context, page)
+                        break
+
+                    if not clicar_botao_govbr_garantido(timeout_segundos=25):
+                        logger.error(f"Tentativa {tentativa_login}: Não foi possível localizar o botão 'Entrar com gov.br'.")
+                        fechar_navegador(browser, context, page)
+                        time.sleep(2)
+                        continue
+
+                    if stop_event and stop_event.is_set():
+                        logger.warning("Execução interrompida após clique no gov.br.")
+                        fechar_navegador(browser, context, page)
+                        break
+
+                    if not clicar_botao_certificado_garantido(timeout_segundos=30):
+                        logger.error(f"Tentativa {tentativa_login}: Não foi possível localizar 'Seu certificado digital'.")
+                        fechar_navegador(browser, context, page)
+                        time.sleep(2)
+                        continue
+
+                    if stop_event and stop_event.is_set():
+                        logger.warning("Execução interrompida antes da seleção do certificado.")
+                        fechar_navegador(browser, context, page)
+                        break
+
+                    # Seleciona o certificado específico do grupo no popup nativo
+                    sucesso_cert = selecionar_e_confirmar_certificado(termo_busca=cert_alvo, timeout_segundos=25)
+                    if not sucesso_cert:
+                        logger.error(
+                            f"\n[ATENÇÃO] O certificado '{nome_cert_exibicao}' NÃO foi localizado ou não está instalado no Windows. "
+                            f"Todos os {len(lista_cnpjs)} CNPJ(s) associados a este grupo foram ignorados."
+                        )
+                        item_global_idx += len(lista_cnpjs)
+                        if progress_callback:
+                            progress_callback(
+                                item_global_idx,
+                                total_itens,
+                                f"Grupo {num_grupo}/{total_grupos} ignorado (Certificado '{nome_cert_exibicao[:20]}' não encontrado)",
+                            )
+                        fechar_navegador(browser, context, page)
+                        sucesso_fase1 = False
+                        break  # Certificado não existe no Windows; encerra tentativas para este grupo
+
+                    sucesso_fase1 = True
+                    break  # Login com sucesso!
+
+                except CaptchaDetectadoException as e_cap:
+                    logger.warning(
+                        f"\n[CAPTCHA DETECTADO] {e_cap}\n"
+                        f"Fechando o navegador e tentando novamente (tentativa {tentativa_login}/{MAX_TENTATIVAS_LOGIN})..."
+                    )
+                    fechar_navegador(browser, context, page)
+                    time.sleep(3)
+                    if tentativa_login == MAX_TENTATIVAS_LOGIN:
+                        logger.error(
+                            f"[CAPTCHA] Limite de {MAX_TENTATIVAS_LOGIN} tentativas atingido para o certificado '{nome_cert_exibicao}' devido ao captcha persistente. "
+                            f"Todos os {len(lista_cnpjs)} CNPJ(s) deste grupo foram ignorados."
+                        )
+                        item_global_idx += len(lista_cnpjs)
+                        if progress_callback:
+                            progress_callback(
+                                item_global_idx,
+                                total_itens,
+                                f"Grupo {num_grupo}/{total_grupos} ignorado por Captcha",
+                            )
+                        sucesso_fase1 = False
+                        break
+
+            if not sucesso_fase1:
+                logger.info(f"Pulando para o próximo grupo de certificados...")
                 continue
 
             logger.info(f"Fase 1 concluída: Certificado '{nome_cert_exibicao}' autenticado. Conectando Playwright...")
