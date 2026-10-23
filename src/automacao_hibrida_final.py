@@ -21,6 +21,8 @@ from pathlib import Path
 from PIL import Image
 
 import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
 import pyautogui
 from pywinauto import Desktop
 from pywinauto.keyboard import send_keys
@@ -718,7 +720,7 @@ def executar_rotatividade_antigos(pasta: Path, eh_pasta: bool, min_itens: int = 
         if eh_pasta:
             itens = [p for p in pasta.iterdir() if p.is_dir()]
         else:
-            itens = [f for f in pasta.iterdir() if f.is_file() and f.suffix.lower() == ".txt"]
+            itens = [f for f in pasta.iterdir() if f.is_file() and f.suffix.lower() in (".txt", ".xlsx")]
 
         if len(itens) < min_itens:
             return
@@ -811,12 +813,12 @@ def processar_item_det(
     perfil_ref: list,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
-) -> bool:
+) -> tuple[bool, str, str]:
     """
-    Processa um único CNPJ/CPF dentro de uma sessão autenticada do DET:
+    Processa um único CNPJ dentro de uma sessão autenticada do DET:
     1. Troca de perfil para o procurador e digita o CNPJ.
-    2. Valida se o CNPJ é aceito.
-    3. Abre Caixa Postal, aplica filtro de não lidas e tira print se houver.
+    2. Valida se o CNPJ é aceito ou se há vínculo/procuração.
+    3. Abre Caixa Postal, aplica filtro de não lidas e tira prints.
     4. Abre Notificações, confere datas, tira prints e baixa anexos.
     5. Retorna à tela de Serviços.
     """
@@ -862,20 +864,31 @@ def processar_item_det(
         page.keyboard.type(item_id, delay=100)
         time.sleep(DELAY_ENTRE_ACOES_S)
 
-        etapa = "Selecionando o perfil e validando CPF/CNPJ"
+        etapa = "Selecionando o perfil e validando CNPJ"
         page.locator("button:has-text('Selecionar')").first.click()
         time.sleep(2)
 
-        # Verifica se apareceu mensagem de CPF/CNPJ inválido no DOM
-        msg_invalido = page.get_by_text(re.compile(r"(CNPJ|CPF)\s+inv.lido", re.IGNORECASE))
+        # 1. Verifica se o DET rejeitou por CNPJ inválido
+        msg_invalido = page.get_by_text(re.compile(r"CNPJ\s+inv.lido", re.IGNORECASE))
         if msg_invalido.count() > 0 and msg_invalido.first.is_visible():
             time.sleep(DELAY_ENTRE_ACOES_S)
             page.locator("button:has-text('Cancelar')").first.click()
             time.sleep(DELAY_ENTRE_ACOES_S)
-            logger.warning(f"Documento inválido, item ignorado: {item_id}")
+            logger.warning(f"CNPJ recusado pelo DET, item ignorado: {item_id}")
             if progress_callback:
-                progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} inválido")
-            return False
+                progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} inválido no DET")
+            return False, "CNPJ_RECUSADO_DET", "DET indicou CNPJ inválido"
+
+        # 2. Verifica se o DET acusou falta de procuração ou vínculo
+        msg_sem_procuracao = page.get_by_text(re.compile(r"(procura..o|v.nculo|n.o\s+encontrado|n.o\s+autorizado|perfil\s+n.o)", re.IGNORECASE))
+        if msg_sem_procuracao.count() > 0 and msg_sem_procuracao.first.is_visible():
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            page.locator("button:has-text('Cancelar')").first.click()
+            time.sleep(DELAY_ENTRE_ACOES_S)
+            logger.warning(f"Sem procuração ou vínculo no DET para o CNPJ: {item_id}")
+            if progress_callback:
+                progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} sem procuração")
+            return False, "SEM_PROCURACAO", "Não foi encontrado procurador/vínculo no DET"
 
         # Criação de pastas do item
         etapa = "Criando a pasta do item"
@@ -1351,7 +1364,7 @@ def processar_item_det(
         logger.info(
             f"SUCESSO: O item '{item_id}' foi verificado. Arquivos guardados (prints + downloads): {qtd_arquivos}"
         )
-        return True
+        return True, "SUCESSO", f"{qtd_arquivos} arquivo(s) guardado(s)"
 
     except Exception as e:
         logger.error(f"Erro no item '{item_id}' na etapa '{etapa}': {e}")
@@ -1359,12 +1372,504 @@ def processar_item_det(
             page.goto(URL_SERVICOS, timeout=60000)
         except Exception:
             pass
-        return False
+        return False, "FALHA_SISTEMA", f"Erro na etapa '{etapa}': {e}"
+
+
+def processar_item_det_com_retry(
+    page,
+    item_id: str,
+    idx_item: int,
+    total_itens: int,
+    screenshots_dir: Path,
+    hoje_date,
+    perfil_ref: list,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> tuple[bool, str, str]:
+    """
+    Executa processar_item_det e, em caso de FALHA_SISTEMA temporária,
+    efetua 1 retry imediato retornando para a tela de Serviços.
+    """
+    sucesso, status_code, detalhe = processar_item_det(
+        page=page,
+        item_id=item_id,
+        idx_item=idx_item,
+        total_itens=total_itens,
+        screenshots_dir=screenshots_dir,
+        hoje_date=hoje_date,
+        perfil_ref=perfil_ref,
+        progress_callback=progress_callback,
+        stop_event=stop_event,
+    )
+
+    if not sucesso and status_code == "FALHA_SISTEMA":
+        if stop_event and stop_event.is_set():
+            return sucesso, status_code, detalhe
+        logger.warning(f"Tentando reprocessamento imediato (1 retry) do CNPJ '{item_id}'...")
+        try:
+            page.goto(URL_SERVICOS, timeout=45000)
+            time.sleep(2)
+            sucesso, status_code, detalhe = processar_item_det(
+                page=page,
+                item_id=item_id,
+                idx_item=idx_item,
+                total_itens=total_itens,
+                screenshots_dir=screenshots_dir,
+                hoje_date=hoje_date,
+                perfil_ref=perfil_ref,
+                progress_callback=progress_callback,
+                stop_event=stop_event,
+            )
+            if sucesso:
+                detalhe = f"{detalhe} (recuperado no retry imediato)"
+        except Exception as e_ret:
+            detalhe = f"Falha persistente após retry imediato: {e_ret}"
+
+    return sucesso, status_code, detalhe
+
+
+class ItemExecucao:
+    """Representa o ciclo de vida e histórico de execução de um CNPJ nas duas tentativas."""
+    def __init__(self, cnpj: str, certificado: str):
+        self.cnpj = str(cnpj).strip()
+        self.certificado = str(certificado).strip()
+        self.status_t1 = "NAO_EXECUTADO"
+        self.detalhe_t1 = ""
+        self.status_t2 = "-"
+        self.detalhe_t2 = "-"
+        self.status_final = "NAO_EXECUTADO"
+        self.data_hora = ""
+
+
+def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[ItemExecucao]) -> Path:
+    """
+    Cria a pasta Relatorios se não existir e gera o arquivo Excel com o histórico
+    detalhado de todas as tentativas e status consolidado de cada CNPJ.
+    """
+    pasta_relatorios = base_dir / "Relatorios"
+    pasta_relatorios.mkdir(parents=True, exist_ok=True)
+    caminho_relatorio = pasta_relatorios / f"Relatorio_Execucao_{execucao_dt_str}.xlsx"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Relatório de Execução"
+
+    headers = [
+        "CNPJ",
+        "Certificado",
+        "Status 1ª Tentativa",
+        "Detalhe 1ª Tentativa",
+        "Status 2ª Tentativa",
+        "Detalhe 2ª Tentativa",
+        "Status Final",
+        "Data/Hora",
+    ]
+    ws.append(headers)
+
+    header_fill = PatternFill(start_color="1351B4", end_color="1351B4", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    header_align = Alignment(horizontal="center", vertical="center")
+
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_align
+
+    for it in itens:
+        ws.append([
+            it.cnpj,
+            it.certificado,
+            it.status_t1,
+            it.detalhe_t1,
+            it.status_t2,
+            it.detalhe_t2,
+            it.status_final,
+            it.data_hora or datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        ])
+
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or "")) for cell in col)
+        col_letter = get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 4, 15)
+
+    wb.save(str(caminho_relatorio))
+    wb.close()
+    logger.info(f"[RELATÓRIO] Planilha de relatório gerada com sucesso em: {caminho_relatorio.name}")
+    return caminho_relatorio
+
+
+def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Optional[Path]:
+    """
+    Gera a planilha CNPJs_Pendentes.xlsx contendo estritamente os CNPJs com falha temporária
+    ou não executados. Caso não haja pendentes, remove qualquer versão residual anterior.
+    """
+    caminho_pendentes = base_dir / "CNPJs_Pendentes.xlsx"
+    pendentes = [it for it in itens if it.status_final in ("FALHA_SISTEMA", "NAO_EXECUTADO")]
+
+    if pendentes:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Documentos"
+        ws["A1"] = "CNPJ"
+        ws["B1"] = "Certificado"
+
+        header_font = Font(bold=True)
+        ws["A1"].font = header_font
+        ws["B1"].font = header_font
+
+        for p in pendentes:
+            ws.append([p.cnpj, p.certificado])
+
+        ws.column_dimensions["A"].width = 25
+        ws.column_dimensions["B"].width = 30
+
+        wb.save(str(caminho_pendentes))
+        wb.close()
+        logger.info(f"[PENDENTES] Planilha 'CNPJs_Pendentes.xlsx' gerada com {len(pendentes)} CNPJ(s) pendente(s).")
+        return caminho_pendentes
+    else:
+        if caminho_pendentes.exists():
+            try:
+                caminho_pendentes.unlink()
+                logger.info("[PENDENTES] Todos os CNPJs foram processados com sucesso. Arquivo 'CNPJs_Pendentes.xlsx' anterior removido.")
+            except Exception as e:
+                logger.warning(f"[PENDENTES] Não foi possível remover planilha anterior de pendentes: {e}")
+        return None
 
 
 # ==============================================================================
 # FLUXO PRINCIPAL DA AUTOMAÇÃO HÍBRIDA
 # ==============================================================================
+def processar_sessao_certificado(
+    cert_alvo: str,
+    lista_cnpjs: list[str],
+    mapa_itens: dict[str, ItemExecucao],
+    rodada: int,
+    num_grupo: int,
+    total_grupos: int,
+    total_itens: int,
+    item_global_counter: list[int],
+    screenshots_dir: Path,
+    hoje_date,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> bool:
+    """
+    Executa a sessão completa para um grupo de certificado (Fases 1 a 4):
+    - Login no Gov.br com retry contra Captcha e Fallback com espera de 60s em caso de portal fora do ar.
+    - Conexão Playwright via CDP.
+    - Processamento de cada CNPJ com retry imediato em caso de erro temporário.
+    - Atualização do histórico em mapa_itens (rodada 1 ou rodada 2).
+    - Logout e fechamento limpo do navegador.
+    """
+    nome_cert_exibicao = cert_alvo if cert_alvo else "Padrão"
+    logger.info(
+        f"\n{'='*60}\n>>> INICIANDO GRUPO {num_grupo}/{total_grupos} (Rodada {rodada}): "
+        f"Certificado '{nome_cert_exibicao}' ({len(lista_cnpjs)} CNPJs)\n{'='*60}"
+    )
+
+    playwright_mgr = None
+    browser = None
+    context = None
+    page = None
+
+    try:
+        # ==================================================================
+        # FASE 1: Login com Retry contra Captcha e Fallback de 60s contra Gov.br Fora do Ar
+        # ==================================================================
+        MAX_TENTATIVAS_CAPTCHA = 5
+        MAX_TENTATIVAS_PORTAL = 2
+        sucesso_fase1 = False
+
+        for tentativa_portal in range(1, MAX_TENTATIVAS_PORTAL + 1):
+            if stop_event and stop_event.is_set():
+                break
+
+            falha_botoes_portal = False
+
+            for tentativa_captcha in range(1, MAX_TENTATIVAS_CAPTCHA + 1):
+                if stop_event and stop_event.is_set():
+                    break
+
+                logger.info(
+                    f"\n>>> Fase 1 (Portal {tentativa_portal}/{MAX_TENTATIVAS_PORTAL} | "
+                    f"Tentativa {tentativa_captcha}/{MAX_TENTATIVAS_CAPTCHA}): "
+                    f"Abertura do Chrome e Login gov.br para '{nome_cert_exibicao}'..."
+                )
+                fechar_navegador(browser, context, page)
+                liberar_porta_se_ocupada()
+                iniciar_chrome_hibrido()
+
+                try:
+                    chrome_win = obter_janela_chrome(timeout_segundos=30)
+                    focar_janela_segura(chrome_win)
+                    time.sleep(2)
+
+                    if stop_event and stop_event.is_set():
+                        fechar_navegador(browser, context, page)
+                        break
+
+                    if not clicar_botao_govbr_garantido(timeout_segundos=25):
+                        logger.warning("Não foi possível localizar o botão 'Entrar com gov.br'.")
+                        falha_botoes_portal = True
+                        fechar_navegador(browser, context, page)
+                        break
+
+                    if stop_event and stop_event.is_set():
+                        fechar_navegador(browser, context, page)
+                        break
+
+                    if not clicar_botao_certificado_garantido(timeout_segundos=30):
+                        logger.warning("Não foi possível localizar 'Seu certificado digital'.")
+                        falha_botoes_portal = True
+                        fechar_navegador(browser, context, page)
+                        break
+
+                    if stop_event and stop_event.is_set():
+                        fechar_navegador(browser, context, page)
+                        break
+
+                    # Seleciona o certificado específico do grupo no popup nativo
+                    sucesso_cert = selecionar_e_confirmar_certificado(termo_busca=cert_alvo, timeout_segundos=25)
+                    if not sucesso_cert:
+                        logger.error(
+                            f"\n[ATENÇÃO] O certificado '{nome_cert_exibicao}' NÃO foi localizado ou não está instalado no Windows. "
+                            f"Todos os {len(lista_cnpjs)} CNPJ(s) associados a este grupo foram ignorados."
+                        )
+                        for doc in lista_cnpjs:
+                            it = mapa_itens[doc]
+                            msg = f"Certificado '{nome_cert_exibicao}' não localizado no Windows"
+                            if rodada == 1:
+                                it.status_t1 = "NAO_EXECUTADO"
+                                it.detalhe_t1 = msg
+                            else:
+                                it.status_t2 = "NAO_EXECUTADO"
+                                it.detalhe_t2 = msg
+                            it.status_final = "NAO_EXECUTADO"
+                            it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+                        item_global_counter[0] += len(lista_cnpjs)
+                        if progress_callback:
+                            progress_callback(
+                                item_global_counter[0],
+                                total_itens,
+                                f"Grupo {num_grupo}/{total_grupos} ignorado (Certificado não encontrado)",
+                            )
+                        fechar_navegador(browser, context, page)
+                        return False
+
+                    sucesso_fase1 = True
+                    break  # Login com sucesso!
+
+                except CaptchaDetectadoException as e_cap:
+                    logger.warning(
+                        f"\n[CAPTCHA DETECTADO] {e_cap}\n"
+                        f"Fechando o navegador e tentando novamente (tentativa {tentativa_captcha}/{MAX_TENTATIVAS_CAPTCHA})..."
+                    )
+                    fechar_navegador(browser, context, page)
+                    time.sleep(3)
+                    if tentativa_captcha == MAX_TENTATIVAS_CAPTCHA:
+                        logger.error(f"[CAPTCHA] Limite de {MAX_TENTATIVAS_CAPTCHA} tentativas atingido para '{nome_cert_exibicao}'.")
+                        falha_botoes_portal = True
+                        break
+
+            if sucesso_fase1:
+                break
+
+            # Se houve falha de portal (site fora do ar ou botões não surgiram):
+            if falha_botoes_portal and tentativa_portal < MAX_TENTATIVAS_PORTAL:
+                logger.warning("\n" + "=" * 80)
+                logger.warning("[ATENÇÃO - NÃO MEXA NO COMPUTADOR]")
+                logger.warning("O portal gov.br apresentou instabilidade ou lentidão na resposta.")
+                logger.warning(f"O navegador será reiniciado e aguardará 60 segundos antes da tentativa {tentativa_portal + 1}/{MAX_TENTATIVAS_PORTAL}.")
+                logger.warning("=" * 80 + "\n")
+                fechar_navegador(browser, context, page)
+
+                for seg_restantes in range(60, 0, -10):
+                    if stop_event and stop_event.is_set():
+                        break
+                    logger.info(f"[AGUARDE] Tentando reconexão ao gov.br em {seg_restantes} segundos... (Não mexa no computador)")
+                    if progress_callback:
+                        progress_callback(
+                            item_global_counter[0],
+                            total_itens,
+                            f"Gov.br instável. Aguardando {seg_restantes}s para tentar novamente...",
+                        )
+                    time.sleep(10)
+            elif falha_botoes_portal and tentativa_portal >= MAX_TENTATIVAS_PORTAL:
+                # Esgotou as 2 tentativas do portal
+                logger.error(f"[PORTAL GOV.BR INDISPONÍVEL] O portal não respondeu após 2 tentativas com intervalo de 60s.")
+                caminho_print_erro_gov = screenshots_dir / f"erro_govbr_indisponivel_{nome_cert_exibicao[:20]}.jpg"
+                try:
+                    pyautogui.screenshot(str(caminho_print_erro_gov))
+                    logger.info(f"[COMPROVANTE] Screenshot do erro no gov.br salvo em: {caminho_print_erro_gov.name}")
+                except Exception:
+                    pass
+
+                for doc in lista_cnpjs:
+                    it = mapa_itens[doc]
+                    msg = "Portal Gov.br indisponível após 2 tentativas (espera de 60s)"
+                    if rodada == 1:
+                        it.status_t1 = "NAO_EXECUTADO"
+                        it.detalhe_t1 = msg
+                    else:
+                        it.status_t2 = "NAO_EXECUTADO"
+                        it.detalhe_t2 = msg
+                    it.status_final = "NAO_EXECUTADO"
+                    it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+                item_global_counter[0] += len(lista_cnpjs)
+                if progress_callback:
+                    progress_callback(
+                        item_global_counter[0],
+                        total_itens,
+                        f"Grupo {num_grupo}/{total_grupos} falhou: Portal Gov.br indisponível",
+                    )
+                fechar_navegador(browser, context, page)
+                return False
+
+        if not sucesso_fase1:
+            fechar_navegador(browser, context, page)
+            return False
+
+        logger.info(f"Fase 1 concluída: Certificado '{nome_cert_exibicao}' autenticado. Conectando Playwright...")
+
+        # ==================================================================
+        # FASE 2: Conexão Playwright via CDP
+        # ==================================================================
+        playwright_mgr = sync_playwright().start()
+
+        for tentativa_cdp in range(1, 6):
+            if stop_event and stop_event.is_set():
+                break
+            try:
+                browser = playwright_mgr.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{CDP_PORT}",
+                    slow_mo=DELAY_SLOW_MO_MS
+                )
+                break
+            except Exception:
+                time.sleep(2)
+
+        if not browser:
+            logger.error("Erro fatal: Não foi possível conectar o Playwright via CDP após 5 tentativas.")
+            if playwright_mgr:
+                playwright_mgr.stop()
+            for doc in lista_cnpjs:
+                it = mapa_itens[doc]
+                msg = "Falha de conexão CDP do Playwright"
+                if rodada == 1:
+                    it.status_t1 = "FALHA_SISTEMA"
+                    it.detalhe_t1 = msg
+                else:
+                    it.status_t2 = "FALHA_SISTEMA"
+                    it.detalhe_t2 = msg
+                it.status_final = "FALHA_SISTEMA"
+                it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            return False
+
+        context = browser.contexts[0]
+        page = context.pages[0] if context.pages else context.new_page()
+
+        try:
+            page.wait_for_url("**/servicos**", timeout=45000)
+        except Exception:
+            pass
+
+        card_caixa_postal = page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
+        card_caixa_postal.wait_for(state="visible", timeout=30000)
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        logger.info(f"Fase 2 estabelecida: Sessão ativa para certificado '{nome_cert_exibicao}'!")
+
+        # ==================================================================
+        # FASE 3: Loop de CNPJs deste certificado
+        # ==================================================================
+        perfil_ref = [0]
+        falhas_seguidas = 0
+
+        for current_item in lista_cnpjs:
+            if stop_event and stop_event.is_set():
+                logger.warning("Execução cancelada pelo usuário.")
+                break
+
+            if falhas_seguidas >= 3:
+                logger.error(
+                    f"3 falhas seguidas no grupo '{nome_cert_exibicao}'. Interrompendo itens restantes deste certificado."
+                )
+                break
+
+            item_id = current_item.strip()
+            if not item_id:
+                continue
+
+            it = mapa_itens[item_id]
+            item_global_counter[0] += 1
+            idx_atual = item_global_counter[0]
+
+            if progress_callback:
+                progress_callback(
+                    idx_atual - 1,
+                    total_itens,
+                    f"R{rodada}: Processando {idx_atual}/{total_itens} ({item_id}) [Cert: {nome_cert_exibicao[:20]}]",
+                )
+
+            # Executa com retry imediato em caso de erro temporário
+            sucesso, status_code, detalhe = processar_item_det_com_retry(
+                page=page,
+                item_id=item_id,
+                idx_item=idx_atual,
+                total_itens=total_itens,
+                screenshots_dir=screenshots_dir,
+                hoje_date=hoje_date,
+                perfil_ref=perfil_ref,
+                progress_callback=progress_callback,
+                stop_event=stop_event,
+            )
+
+            # Registra no ItemExecucao correspondente
+            if rodada == 1:
+                it.status_t1 = status_code
+                it.detalhe_t1 = detalhe
+            else:
+                it.status_t2 = status_code
+                it.detalhe_t2 = detalhe
+            it.status_final = status_code
+            it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+            if sucesso:
+                falhas_seguidas = 0
+            else:
+                falhas_seguidas += 1
+
+            if progress_callback:
+                progress_callback(
+                    idx_atual,
+                    total_itens,
+                    f"R{rodada}: Item {idx_atual}/{total_itens} ({item_id}) - {status_code}",
+                )
+
+        return True
+
+    except Exception as e_grupo:
+        logger.error(f"Erro no processamento do grupo de certificado '{nome_cert_exibicao}': {e_grupo}")
+        return False
+
+    finally:
+        # FASE 4: Logout do DET e Fechamento Limpo do Chrome deste grupo
+        if page and not page.is_closed():
+            efetuar_logout_det(page)
+
+        logger.info(f"Fechando sessão do Chrome para certificado '{nome_cert_exibicao}'...")
+        fechar_navegador(browser, context, page)
+        if playwright_mgr:
+            try:
+                playwright_mgr.stop()
+            except Exception:
+                pass
+        time.sleep(2)
+
+
 def executar_robo_hibrido(
     base_dir: Path,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
@@ -1384,11 +1889,13 @@ def executar_robo_hibrido(
     execucao_dt_str = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
     screenshots_raiz = base_dir / "CapturasDeTela"
     screenshots_dir = screenshots_raiz / execucao_dt_str
+    pasta_logs = base_dir / "Logs"
+    pasta_relatorios = base_dir / "Relatorios"
 
     # Rotatividade de histórico: exclui itens com mais de 60 dias se houver 10 ou mais itens
-    pasta_logs = base_dir / "Logs"
     executar_rotatividade_antigos(pasta_logs, eh_pasta=False, min_itens=10, limite_dias=60)
     executar_rotatividade_antigos(screenshots_raiz, eh_pasta=True, min_itens=10, limite_dias=60)
+    executar_rotatividade_antigos(pasta_relatorios, eh_pasta=False, min_itens=10, limite_dias=60)
 
     # 1. Verificação da Planilha de Entrada
     if not excel_path.exists():
@@ -1434,21 +1941,43 @@ def executar_robo_hibrido(
 
     if not dados_filtrados:
         logger.warning(
-            f"A planilha em '{excel_path}' não contém CNPJs ou CPFs para processar. Preencha e inicie novamente."
+            f"A planilha em '{excel_path}' não contém CNPJs para processar. Preencha e inicie novamente."
         )
         return
 
-    # Agrupamento inteligente por certificado (preserva ordem de inserção)
-    # Mesmo se o usuário preencher aleatoriamente na planilha, agrupa para abrir apenas 1 sessão por certificado
+    # Inicializa o mapa de rastreamento de cada CNPJ para o relatório de execução
+    mapa_itens: dict[str, ItemExecucao] = {
+        doc: ItemExecucao(doc, cert)
+        for doc, cert in dados_filtrados
+    }
+
+    # Validação prévia de tamanho (estritamente 14 dígitos numéricos para CNPJ)
+    for doc, it in mapa_itens.items():
+        digits = re.sub(r"\D", "", doc)
+        if len(digits) != 14:
+            it.status_t1 = "CNPJ_INVALIDO"
+            it.detalhe_t1 = f"Tamanho incorreto ({len(digits)} dígitos em vez de 14)"
+            it.status_final = "CNPJ_INVALIDO"
+            it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            logger.warning(
+                f"[CNPJ INVÁLIDO] O documento '{doc}' possui {len(digits)} dígitos (esperado 14 para CNPJ). "
+                f"Será ignorado da consulta no DET."
+            )
+
+    # Agrupamento inteligente por certificado apenas dos itens com tamanho válido
     grupos_certificados = defaultdict(list)
     for doc, cert in dados_filtrados:
-        cert_chave = cert.strip()  # se vazio, vira string vazia (certificado padrão)
-        grupos_certificados[cert_chave].append(doc)
+        if mapa_itens[doc].status_final != "CNPJ_INVALIDO":
+            cert_chave = cert.strip()
+            grupos_certificados[cert_chave].append(doc)
 
     total_itens = len(dados_filtrados)
+    total_validos = sum(len(v) for v in grupos_certificados.values())
     total_grupos = len(grupos_certificados)
+
     logger.info(
-        f"Planilha carregada com sucesso. Total de itens: {total_itens} distribuídos em {total_grupos} grupo(s) de certificado."
+        f"Planilha carregada com sucesso. Total de itens: {total_itens} "
+        f"({total_validos} com tamanho válido distribuídos em {total_grupos} grupo(s) de certificado)."
     )
     if progress_callback:
         progress_callback(0, total_itens, f"Iniciando automação... (0/{total_itens})")
@@ -1456,232 +1985,72 @@ def executar_robo_hibrido(
     limpar_ou_criar_pasta(screenshots_dir)
     logger.info(f"Pasta de capturas desta execução: {screenshots_dir}")
 
-    item_global_idx = 0
+    item_counter = [0]
 
-    # Itera sobre cada grupo de certificado
-    for num_grupo, (cert_alvo, lista_cnpjs) in enumerate(grupos_certificados.items(), start=1):
-        if stop_event and stop_event.is_set():
-            logger.warning("Execução cancelada antes do próximo grupo de certificados.")
-            break
+    try:
+        # ==================================================================
+        # RODADA 1: Execução Principal de todos os grupos de certificado
+        # ==================================================================
+        for num_grupo, (cert_alvo, lista_cnpjs) in enumerate(grupos_certificados.items(), start=1):
+            if stop_event and stop_event.is_set():
+                logger.warning("Execução interrompida pelo usuário.")
+                break
 
-        nome_cert_exibicao = cert_alvo if cert_alvo else "Padrão"
-        logger.info(
-            f"\n{'='*60}\n>>> INICIANDO GRUPO {num_grupo}/{total_grupos}: Certificado '{nome_cert_exibicao}' ({len(lista_cnpjs)} CNPJs)\n{'='*60}"
-        )
+            processar_sessao_certificado(
+                cert_alvo=cert_alvo,
+                lista_cnpjs=lista_cnpjs,
+                mapa_itens=mapa_itens,
+                rodada=1,
+                num_grupo=num_grupo,
+                total_grupos=total_grupos,
+                total_itens=total_itens,
+                item_global_counter=item_counter,
+                screenshots_dir=screenshots_dir,
+                hoje_date=hoje_date,
+                progress_callback=progress_callback,
+                stop_event=stop_event,
+            )
 
-        playwright_mgr = None
-        browser = None
-        context = None
-        page = None
+        # ==================================================================
+        # RODADA 2: Reprocessamento Automático de CNPJs Pendentes
+        # ==================================================================
+        itens_pendentes = [it for it in mapa_itens.values() if it.status_final in ("FALHA_SISTEMA", "NAO_EXECUTADO")]
+        if itens_pendentes and not (stop_event and stop_event.is_set()):
+            logger.info("\n" + "=" * 80)
+            logger.info(f"[RODADA 2 - REPROCESSAMENTO AUTOMÁTICO] {len(itens_pendentes)} CNPJ(s) pendente(s).")
+            logger.info("Executando segunda passada para recuperar itens com falha temporária...")
+            logger.info("=" * 80 + "\n")
 
-        try:
-            # ==================================================================
-            # FASE 1: Login via Sistema Operacional (Chrome Híbrido com Retry contra Captcha)
-            # ==================================================================
-            MAX_TENTATIVAS_LOGIN = 5
-            sucesso_fase1 = False
+            grupos_pendentes = defaultdict(list)
+            for it in itens_pendentes:
+                grupos_pendentes[it.certificado].append(it.cnpj)
 
-            for tentativa_login in range(1, MAX_TENTATIVAS_LOGIN + 1):
-                if stop_event and stop_event.is_set():
-                    logger.warning("Execução interrompida pelo usuário antes do login.")
-                    break
+            total_grupos_p = len(grupos_pendentes)
+            item_counter_r2 = [0]
 
-                logger.info(
-                    f"\n>>> Fase 1 (Tentativa {tentativa_login}/{MAX_TENTATIVAS_LOGIN}): "
-                    f"Abertura do Chrome e Login gov.br para certificado '{nome_cert_exibicao}'..."
-                )
-                fechar_navegador(browser, context, page)
-                liberar_porta_se_ocupada()
-                iniciar_chrome_hibrido()
-
-                try:
-                    chrome_win = obter_janela_chrome(timeout_segundos=30)
-                    focar_janela_segura(chrome_win)
-                    time.sleep(2)
-
-                    if stop_event and stop_event.is_set():
-                        logger.warning("Execução interrompida antes do login.")
-                        fechar_navegador(browser, context, page)
-                        break
-
-                    if not clicar_botao_govbr_garantido(timeout_segundos=25):
-                        logger.error(f"Tentativa {tentativa_login}: Não foi possível localizar o botão 'Entrar com gov.br'.")
-                        fechar_navegador(browser, context, page)
-                        time.sleep(2)
-                        continue
-
-                    if stop_event and stop_event.is_set():
-                        logger.warning("Execução interrompida após clique no gov.br.")
-                        fechar_navegador(browser, context, page)
-                        break
-
-                    if not clicar_botao_certificado_garantido(timeout_segundos=30):
-                        logger.error(f"Tentativa {tentativa_login}: Não foi possível localizar 'Seu certificado digital'.")
-                        fechar_navegador(browser, context, page)
-                        time.sleep(2)
-                        continue
-
-                    if stop_event and stop_event.is_set():
-                        logger.warning("Execução interrompida antes da seleção do certificado.")
-                        fechar_navegador(browser, context, page)
-                        break
-
-                    # Seleciona o certificado específico do grupo no popup nativo
-                    sucesso_cert = selecionar_e_confirmar_certificado(termo_busca=cert_alvo, timeout_segundos=25)
-                    if not sucesso_cert:
-                        logger.error(
-                            f"\n[ATENÇÃO] O certificado '{nome_cert_exibicao}' NÃO foi localizado ou não está instalado no Windows. "
-                            f"Todos os {len(lista_cnpjs)} CNPJ(s) associados a este grupo foram ignorados."
-                        )
-                        item_global_idx += len(lista_cnpjs)
-                        if progress_callback:
-                            progress_callback(
-                                item_global_idx,
-                                total_itens,
-                                f"Grupo {num_grupo}/{total_grupos} ignorado (Certificado '{nome_cert_exibicao[:20]}' não encontrado)",
-                            )
-                        fechar_navegador(browser, context, page)
-                        sucesso_fase1 = False
-                        break  # Certificado não existe no Windows; encerra tentativas para este grupo
-
-                    sucesso_fase1 = True
-                    break  # Login com sucesso!
-
-                except CaptchaDetectadoException as e_cap:
-                    logger.warning(
-                        f"\n[CAPTCHA DETECTADO] {e_cap}\n"
-                        f"Fechando o navegador e tentando novamente (tentativa {tentativa_login}/{MAX_TENTATIVAS_LOGIN})..."
-                    )
-                    fechar_navegador(browser, context, page)
-                    time.sleep(3)
-                    if tentativa_login == MAX_TENTATIVAS_LOGIN:
-                        logger.error(
-                            f"[CAPTCHA] Limite de {MAX_TENTATIVAS_LOGIN} tentativas atingido para o certificado '{nome_cert_exibicao}' devido ao captcha persistente. "
-                            f"Todos os {len(lista_cnpjs)} CNPJ(s) deste grupo foram ignorados."
-                        )
-                        item_global_idx += len(lista_cnpjs)
-                        if progress_callback:
-                            progress_callback(
-                                item_global_idx,
-                                total_itens,
-                                f"Grupo {num_grupo}/{total_grupos} ignorado por Captcha",
-                            )
-                        sucesso_fase1 = False
-                        break
-
-            if not sucesso_fase1:
-                logger.info(f"Pulando para o próximo grupo de certificados...")
-                continue
-
-            logger.info(f"Fase 1 concluída: Certificado '{nome_cert_exibicao}' autenticado. Conectando Playwright...")
-
-            # ==================================================================
-            # FASE 2: Conexão Playwright via CDP
-            # ==================================================================
-            playwright_mgr = sync_playwright().start()
-
-            for tentativa_cdp in range(1, 6):
+            for num_grupo, (cert_alvo, lista_p) in enumerate(grupos_pendentes.items(), start=1):
                 if stop_event and stop_event.is_set():
                     break
-                try:
-                    browser = playwright_mgr.chromium.connect_over_cdp(
-                        f"http://127.0.0.1:{CDP_PORT}",
-                        slow_mo=DELAY_SLOW_MO_MS
-                    )
-                    break
-                except Exception:
-                    time.sleep(2)
 
-            if not browser:
-                logger.error("Erro fatal: Não foi possível conectar o Playwright via CDP após 5 tentativas.")
-                if playwright_mgr:
-                    playwright_mgr.stop()
-                continue
-
-            context = browser.contexts[0]
-            page = context.pages[0] if context.pages else context.new_page()
-
-            try:
-                page.wait_for_url("**/servicos**", timeout=45000)
-            except Exception:
-                pass
-
-            card_caixa_postal = page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
-            card_caixa_postal.wait_for(state="visible", timeout=30000)
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            logger.info(f"Fase 2 estabelecida: Sessão ativa para certificado '{nome_cert_exibicao}'!")
-
-            # ==================================================================
-            # FASE 3: Loop de CNPJs deste certificado
-            # ==================================================================
-            perfil_ref = [0]
-            falhas_seguidas = 0
-
-            for current_item in lista_cnpjs:
-                if stop_event and stop_event.is_set():
-                    logger.warning("Execução cancelada pelo usuário.")
-                    break
-
-                if falhas_seguidas >= 3:
-                    logger.error(
-                        f"3 falhas seguidas no grupo '{nome_cert_exibicao}'. Interrompendo itens restantes deste certificado."
-                    )
-                    break
-
-                item_id = current_item.strip()
-                if not item_id:
-                    continue
-
-                item_global_idx += 1
-                if progress_callback:
-                    progress_callback(
-                        item_global_idx - 1,
-                        total_itens,
-                        f"Processando {item_global_idx}/{total_itens} ({item_id}) [Cert: {nome_cert_exibicao[:20]}]",
-                    )
-
-                sucesso = processar_item_det(
-                    page=page,
-                    item_id=item_id,
-                    idx_item=item_global_idx,
-                    total_itens=total_itens,
+                processar_sessao_certificado(
+                    cert_alvo=cert_alvo,
+                    lista_cnpjs=lista_p,
+                    mapa_itens=mapa_itens,
+                    rodada=2,
+                    num_grupo=num_grupo,
+                    total_grupos=total_grupos_p,
+                    total_itens=len(itens_pendentes),
+                    item_global_counter=item_counter_r2,
                     screenshots_dir=screenshots_dir,
                     hoje_date=hoje_date,
-                    perfil_ref=perfil_ref,
                     progress_callback=progress_callback,
                     stop_event=stop_event,
                 )
 
-                if sucesso:
-                    falhas_seguidas = 0
-                else:
-                    falhas_seguidas += 1
-
-                if progress_callback:
-                    progress_callback(
-                        item_global_idx,
-                        total_itens,
-                        f"Item {item_global_idx}/{total_itens} finalizado ({item_id})",
-                    )
-
-        except Exception as e_grupo:
-            logger.error(f"Erro no processamento do grupo de certificado '{nome_cert_exibicao}': {e_grupo}")
-
-        finally:
-            # ==================================================================
-            # FASE 4: Logout do DET e Fechamento Limpo do Chrome deste grupo
-            # ==================================================================
-            if page and not page.is_closed():
-                efetuar_logout_det(page)
-
-            logger.info(f"Fechando sessão do Chrome para certificado '{nome_cert_exibicao}'...")
-            fechar_navegador(browser, context, page)
-            if playwright_mgr:
-                try:
-                    playwright_mgr.stop()
-                except Exception:
-                    pass
-            time.sleep(2)
+    finally:
+        # Gera o Relatório de Execução consolidado com histórico e a Planilha de Pendentes sempre!
+        salvar_relatorio_execucao(base_dir, execucao_dt_str, list(mapa_itens.values()))
+        salvar_planilha_pendentes(base_dir, list(mapa_itens.values()))
 
     logger.info("Automação de todos os certificados e CNPJs finalizada com sucesso.")
 
