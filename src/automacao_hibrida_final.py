@@ -38,6 +38,9 @@ URL_SERVICOS = "https://det.sit.trabalho.gov.br/servicos"
 # Em produção, trocar para False (data >= hoje).
 MODO_TESTE = True
 
+# Diretório base padrão para depuração e caminhos de fallback
+BASE_DIR = Path.cwd()
+
 # Configurações do Chrome Real e Porta CDP
 CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 CHROME_USER_DATA = Path(os.environ["LOCALAPPDATA"]) / "Google" / "Chrome" / "User Data_RoboDET"
@@ -94,6 +97,11 @@ IMG_DEBUG_ERRO = IMG_DIR / "debug_tela_erro.png"
 
 class CaptchaDetectadoException(Exception):
     """Exceção levantada quando um desafio hCaptcha é detectado durante o login gov.br."""
+    pass
+
+
+class VerificacaoDuasEtapasException(Exception):
+    """Exceção levantada quando a tela de Verificação em duas etapas (2FA) do gov.br é detectada."""
     pass
 
 # ==============================================================================
@@ -237,19 +245,19 @@ def detectar_presenca_captcha() -> bool:
     """
     Verifica se o desafio hCaptcha surgiu na tela após clicar em 'Seu certificado digital'
     (ou durante a autenticação gov.br).
-    Utiliza 3 métodos complementares para máxima confiabilidade e velocidade:
+    Utiliza 3 métodos complementares com validação rigorosa para evitar falsos positivos:
     1. Detecção cromática por contagem de pixels na cor turquesa/teal (#028490) do hCaptcha.
-    2. Correspondência de imagem PyAutoGUI (botão 'Avançar' ou ícone da mãozinha).
-    3. Inspeção UIA no Windows procurando por elementos típicos do desafio hCaptcha.
+    2. Correspondência de imagem PyAutoGUI (ícone da mãozinha ou botão 'Avançar' com validação cruzada).
+    3. Inspeção UIA no Windows procurando por termos explícitos do desafio hCaptcha.
     """
-    # 1. Detecção cromática via screenshot (instantânea e imune a variações do texto da instrução)
+    teal_count = 0
+    # 1. Detecção cromática via screenshot (instantânea e imune a variações de texto)
     try:
         shot = pyautogui.screenshot()
         w, h = shot.size
         # Foca na região central da tela onde o card flutuante do hCaptcha é renderizado
         box = (int(w * 0.15), int(h * 0.05), int(w * 0.85), int(h * 0.95))
         cropped = shot.crop(box)
-        teal_count = 0
         for p in cropped.get_flattened_data():
             # R < 40, 95 < G < 155, 110 < B < 170 (cor sólida da barra superior do hCaptcha)
             if p[0] < 40 and 95 < p[1] < 155 and 110 < p[2] < 170:
@@ -262,22 +270,53 @@ def detectar_presenca_captcha() -> bool:
     except Exception as e_cor:
         logger.debug(f"Erro na checagem cromática de captcha: {e_cor}")
 
-    # 2. Correspondência de imagem (botão Avançar ou ícone de acessibilidade do hCaptcha)
+    # 2. Correspondência de imagem (ícone de acessibilidade do hCaptcha ou botão Avançar validado)
     try:
-        if IMG_CAPTCHA_AVANCAR.exists():
-            pos_avancar = localizar_imagem(IMG_CAPTCHA_AVANCAR, confidence=0.75)
-            if pos_avancar:
-                logger.warning(f"[CAPTCHA] Desafio hCaptcha detectado pelo botão 'Avançar' em ({pos_avancar.x}, {pos_avancar.y})!")
-                return True
+        # Ícone de acessibilidade exclusivo do widget hCaptcha (mãozinha)
         if IMG_CAPTCHA_HAND.exists():
-            pos_hand = localizar_imagem(IMG_CAPTCHA_HAND, confidence=0.75)
+            pos_hand = pyautogui.locateCenterOnScreen(str(IMG_CAPTCHA_HAND), confidence=0.85)
             if pos_hand:
                 logger.warning(f"[CAPTCHA] Desafio hCaptcha detectado pelo ícone da mãozinha em ({pos_hand.x}, {pos_hand.y})!")
                 return True
+
+        # O botão 'Avançar' só confirma captcha se tiver alta fidelidade E comprovação visual (cor turquesa)
+        if IMG_CAPTCHA_AVANCAR.exists():
+            pos_avancar = pyautogui.locateCenterOnScreen(str(IMG_CAPTCHA_AVANCAR), confidence=0.85)
+            if pos_avancar:
+                if teal_count >= 300:
+                    logger.warning(
+                        f"[CAPTCHA] Desafio hCaptcha detectado pelo botão 'Avançar' em ({pos_avancar.x}, {pos_avancar.y}) "
+                        f"confirmado por {teal_count} pixels turquesa!"
+                    )
+                    return True
+                else:
+                    logger.debug(
+                        f"Botão semelhante a 'Avançar' em ({pos_avancar.x}, {pos_avancar.y}) ignorado por falta de indícios cromáticos do hCaptcha."
+                    )
     except Exception as e_img:
         logger.debug(f"Erro na checagem por imagem de captcha: {e_img}")
 
-    # 3. Fallback UIA no Windows
+    # 3. Fallback UIA no Windows procurando por termos inequívocos do desafio
+    try:
+        desktop = Desktop(backend="uia")
+        for win in desktop.windows():
+            titulo = win.window_text().lower()
+            if any(k in titulo for k in ["gov.br", "acesse sua conta"]):
+                for desc in win.descendants():
+                    txt = (desc.window_text() or desc.element_info.name or "").lower()
+                    if any(term in txt for term in ["clique nos itens", "clique em cada", "hcaptcha", "desafio"]):
+                        logger.warning(f"[CAPTCHA] Desafio hCaptcha detectado via UIA pelo texto: '{txt}'!")
+                        return True
+    except Exception:
+        pass
+
+    return False
+
+
+def detectar_presenca_2fa_uia() -> bool:
+    """
+    Verifica via UIA no Windows se a tela de Verificação em duas etapas (2FA) do gov.br está visível.
+    """
     try:
         desktop = Desktop(backend="uia")
         for win in desktop.windows():
@@ -285,16 +324,57 @@ def detectar_presenca_captcha() -> bool:
             if any(k in titulo for k in ["gov.br", "acesse sua conta", "chrome"]):
                 for desc in win.descendants():
                     txt = (desc.window_text() or desc.element_info.name or "").lower()
-                    if any(term in txt for term in ["clique nos itens", "clique em cada", "hcaptcha", "desafio"]):
-                        logger.warning(f"[CAPTCHA] Desafio hCaptcha detectado via UIA pelo texto: '{txt}'!")
-                        return True
-                    if desc.element_info.control_type == "Button" and txt in ["avançar", "avancar", "verificar"]:
-                        logger.warning(f"[CAPTCHA] Desafio hCaptcha detectado via UIA pelo botão: '{txt}'!")
+                    if any(term in txt for term in ["verificação em duas etapas", "duas etapas", "código de acesso", "gerar código de acesso"]):
+                        logger.warning(f"[2FA] Tela de Verificação em duas etapas detectada via UIA: '{txt}'!")
                         return True
     except Exception:
         pass
-
     return False
+
+
+def detectar_verificacao_duas_etapas_playwright(page) -> bool:
+    """
+    Verifica se a página atual do gov.br está exibindo a tela de 'Verificação em duas etapas' (2FA).
+    """
+    try:
+        url_atual = page.url.lower()
+        if "sso.acesso.gov.br" in url_atual or "login" in url_atual or "duasetapas" in url_atual:
+            termos_2fa = [
+                "text=Verificação em duas etapas",
+                "text=Confirme sua identidade com a Verificação em duas etapas",
+                "text=Gerar código de acesso",
+                "text=Código de acesso",
+                "input[placeholder*='Código de acesso']",
+                "input[placeholder*='codigo de acesso']",
+                "input[aria-label*='Código de acesso']",
+            ]
+            for seletor in termos_2fa:
+                try:
+                    if page.locator(seletor).first.is_visible(timeout=500):
+                        return True
+                except Exception:
+                    pass
+
+            # Verificação complementar pelo conteúdo HTML da página
+            conteudo = page.content().lower()
+            if "verificação em duas etapas" in conteudo or "verificacao em duas etapas" in conteudo:
+                return True
+            if "gerar código de acesso" in conteudo and "aplicativo gov.br" in conteudo:
+                return True
+    except Exception as e:
+        logger.debug(f"Erro ao verificar tela de 2FA no Playwright: {e}")
+    return False
+
+
+def verificar_2fa_em_todas_paginas(context) -> tuple[bool, Optional[any]]:
+    """Verifica se alguma das abas abertas no contexto exibe a tela de 2FA."""
+    try:
+        for p in context.pages:
+            if not p.is_closed() and detectar_verificacao_duas_etapas_playwright(p):
+                return True, p
+    except Exception:
+        pass
+    return False, None
 
 
 def clicar_botao_govbr_garantido(timeout_segundos: int = 25) -> bool:
@@ -336,9 +416,6 @@ def clicar_botao_certificado_garantido(timeout_segundos: int = 30) -> bool:
 
     while time.time() < fim:
         tentativa += 1
-
-        if detectar_presenca_captcha():
-            raise CaptchaDetectadoException("hCaptcha detectado na tela de autenticação gov.br.")
 
         pos = localizar_imagem(IMG_CERT, confidence=0.75)
         if pos:
@@ -469,6 +546,9 @@ def selecionar_e_confirmar_certificado(termo_busca: str = "", timeout_segundos: 
 
         if detectar_presenca_captcha():
             raise CaptchaDetectadoException("hCaptcha detectado durante o aguardo do popup de certificado.")
+
+        if detectar_presenca_2fa_uia():
+            raise VerificacaoDuasEtapasException("Tela de Verificação em duas etapas (2FA) detectada.")
 
         try:
             desktop = Desktop(backend="uia")
@@ -1476,6 +1556,10 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
         cell.font = header_font
         cell.alignment = header_align
 
+    fill_sucesso = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    fill_2fa = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    fill_falha = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+
     for it in itens:
         ws.append([
             it.cnpj,
@@ -1487,6 +1571,14 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
             it.status_final,
             it.data_hora or datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
         ])
+        row_idx = ws.max_row
+        status_cell = ws.cell(row=row_idx, column=7)
+        if it.status_final == "SUCESSO":
+            status_cell.fill = fill_sucesso
+        elif it.status_final == "EXIGE_2FA":
+            status_cell.fill = fill_2fa
+        elif it.status_final in ("FALHA_SISTEMA", "NAO_EXECUTADO"):
+            status_cell.fill = fill_falha
 
     for col in ws.columns:
         max_len = max(len(str(cell.value or "")) for cell in col)
@@ -1501,11 +1593,11 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
 
 def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Optional[Path]:
     """
-    Gera a planilha CNPJs_Pendentes.xlsx contendo estritamente os CNPJs com falha temporária
-    ou não executados. Caso não haja pendentes, remove qualquer versão residual anterior.
+    Gera a planilha CNPJs_Pendentes.xlsx contendo os CNPJs com falha temporária,
+    não executados ou bloqueados por 2FA. Caso não haja pendentes, remove qualquer versão residual anterior.
     """
     caminho_pendentes = base_dir / "CNPJs_Pendentes.xlsx"
-    pendentes = [it for it in itens if it.status_final in ("FALHA_SISTEMA", "NAO_EXECUTADO")]
+    pendentes = [it for it in itens if it.status_final in ("FALHA_SISTEMA", "NAO_EXECUTADO", "EXIGE_2FA")]
 
     if pendentes:
         wb = openpyxl.Workbook()
@@ -1536,6 +1628,63 @@ def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Opti
             except Exception as e:
                 logger.warning(f"[PENDENTES] Não foi possível remover planilha anterior de pendentes: {e}")
         return None
+
+
+def registrar_pulo_2fa(
+    lista_cnpjs: list[str],
+    mapa_itens: dict[str, ItemExecucao],
+    nome_cert_exibicao: str,
+    rodada: int,
+    num_grupo: int,
+    total_grupos: int,
+    total_itens: int,
+    item_global_counter: list[int],
+    screenshots_dir: Path,
+    pagina_2fa=None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+):
+    """
+    Registra o pulo imediato de um certificado que exibiu a tela de Verificação em duas etapas (2FA),
+    atualiza o histórico de todos os CNPJs do grupo para o relatório e tira screenshot comprobatório.
+    """
+    logger.warning("\n" + "=" * 80)
+    logger.warning(
+        f"[VERIFICAÇÃO EM DUAS ETAPAS] O certificado '{nome_cert_exibicao}' exibiu tela de Verificação em duas etapas no Gov.br.\n"
+        f"Fechando o navegador e pulando todos os {len(lista_cnpjs)} CNPJ(s) associados a este certificado."
+    )
+    logger.warning("=" * 80 + "\n")
+
+    nome_seguro = re.sub(r"[^a-zA-Z0-9_-]", "_", nome_cert_exibicao)[:25]
+    caminho_print_2fa = screenshots_dir / f"2FA_{nome_seguro}_{datetime.now().strftime('%H%M%S')}.png"
+    try:
+        if pagina_2fa and not pagina_2fa.is_closed():
+            pagina_2fa.screenshot(path=str(caminho_print_2fa))
+        else:
+            pyautogui.screenshot(str(caminho_print_2fa))
+        logger.info(f"[COMPROVANTE] Screenshot da tela de 2FA salvo em: {caminho_print_2fa.name}")
+    except Exception as e_shot:
+        logger.debug(f"Não foi possível salvar screenshot de 2FA: {e_shot}")
+
+    for doc in lista_cnpjs:
+        it = mapa_itens[doc]
+        status_code = "EXIGE_2FA"
+        msg = "Certificado exige Verificação em duas etapas (2FA) no Gov.br"
+        if rodada == 1:
+            it.status_t1 = status_code
+            it.detalhe_t1 = msg
+        else:
+            it.status_t2 = status_code
+            it.detalhe_t2 = msg
+        it.status_final = status_code
+        it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    item_global_counter[0] += len(lista_cnpjs)
+    if progress_callback:
+        progress_callback(
+            item_global_counter[0],
+            total_itens,
+            f"Grupo {num_grupo}/{total_grupos} pulado: Exige 2FA no Gov.br ({nome_cert_exibicao[:20]})",
+        )
 
 
 # ==============================================================================
@@ -1662,6 +1811,22 @@ def processar_sessao_certificado(
                     sucesso_fase1 = True
                     break  # Login com sucesso!
 
+                except VerificacaoDuasEtapasException:
+                    registrar_pulo_2fa(
+                        lista_cnpjs=lista_cnpjs,
+                        mapa_itens=mapa_itens,
+                        nome_cert_exibicao=nome_cert_exibicao,
+                        rodada=rodada,
+                        num_grupo=num_grupo,
+                        total_grupos=total_grupos,
+                        total_itens=total_itens,
+                        item_global_counter=item_global_counter,
+                        screenshots_dir=screenshots_dir,
+                        progress_callback=progress_callback,
+                    )
+                    fechar_navegador(browser, context, page)
+                    return False
+
                 except CaptchaDetectadoException as e_cap:
                     logger.warning(
                         f"\n[CAPTCHA DETECTADO] {e_cap}\n"
@@ -1772,13 +1937,100 @@ def processar_sessao_certificado(
         context = browser.contexts[0]
         page = context.pages[0] if context.pages else context.new_page()
 
-        try:
-            page.wait_for_url("**/servicos**", timeout=45000)
-        except Exception:
-            pass
+        inicio_espera = time.time()
+        timeout_login = 45
+        sessao_estabelecida = False
+        tela_2fa_detectada = False
+        pagina_2fa = None
 
-        card_caixa_postal = page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
-        card_caixa_postal.wait_for(state="visible", timeout=30000)
+        logger.info(f"Aguardando autenticação e carregamento do portal DET para '{nome_cert_exibicao}'...")
+
+        while time.time() - inicio_espera < timeout_login:
+            if stop_event and stop_event.is_set():
+                break
+
+            # 1. Verifica se a tela de 2FA surgiu em alguma das páginas do navegador
+            tem_2fa, p_2fa = verificar_2fa_em_todas_paginas(context)
+            if not tem_2fa and detectar_presenca_2fa_uia():
+                tem_2fa = True
+                p_2fa = page
+
+            if tem_2fa:
+                tela_2fa_detectada = True
+                pagina_2fa = p_2fa
+                break
+
+            # 2. Verifica se houve sucesso de login e chegada no DET (/servicos)
+            for p in reversed(context.pages):
+                if not p.is_closed():
+                    try:
+                        url_p = p.url.lower()
+                        if "det.sit.trabalho.gov.br" in url_p or "/servicos" in url_p:
+                            card = p.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
+                            if card.is_visible():
+                                page = p
+                                sessao_estabelecida = True
+                                break
+                    except Exception:
+                        pass
+            if sessao_estabelecida:
+                break
+
+            time.sleep(1.0)
+
+        if tela_2fa_detectada:
+            registrar_pulo_2fa(
+                lista_cnpjs=lista_cnpjs,
+                mapa_itens=mapa_itens,
+                nome_cert_exibicao=nome_cert_exibicao,
+                rodada=rodada,
+                num_grupo=num_grupo,
+                total_grupos=total_grupos,
+                total_itens=total_itens,
+                item_global_counter=item_global_counter,
+                screenshots_dir=screenshots_dir,
+                pagina_2fa=pagina_2fa,
+                progress_callback=progress_callback,
+            )
+            fechar_navegador(browser, context, page)
+            if playwright_mgr:
+                try:
+                    playwright_mgr.stop()
+                except Exception:
+                    pass
+            return False
+
+        if not sessao_estabelecida:
+            logger.error(
+                f"Tempo limite esgotado ({timeout_login}s) aguardando login ou portal DET para '{nome_cert_exibicao}'."
+            )
+            for doc in lista_cnpjs:
+                it = mapa_itens[doc]
+                msg = "Tempo limite esgotado aguardando carregamento do portal DET"
+                if rodada == 1:
+                    it.status_t1 = "FALHA_SISTEMA"
+                    it.detalhe_t1 = msg
+                else:
+                    it.status_t2 = "FALHA_SISTEMA"
+                    it.detalhe_t2 = msg
+                it.status_final = "FALHA_SISTEMA"
+                it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+            item_global_counter[0] += len(lista_cnpjs)
+            if progress_callback:
+                progress_callback(
+                    item_global_counter[0],
+                    total_itens,
+                    f"Grupo {num_grupo}/{total_grupos} falhou: Timeout no portal DET",
+                )
+            fechar_navegador(browser, context, page)
+            if playwright_mgr:
+                try:
+                    playwright_mgr.stop()
+                except Exception:
+                    pass
+            return False
+
         time.sleep(DELAY_ENTRE_ACOES_S)
         logger.info(f"Fase 2 estabelecida: Sessão ativa para certificado '{nome_cert_exibicao}'!")
 
@@ -2056,6 +2308,7 @@ def executar_robo_hibrido(
         salvar_planilha_pendentes(base_dir, list(mapa_itens.values()))
 
     itens_sucesso = sum(1 for it in mapa_itens.values() if it.status_final == "SUCESSO")
+    itens_2fa = sum(1 for it in mapa_itens.values() if it.status_final == "EXIGE_2FA")
     itens_falha = total_itens - itens_sucesso
     if itens_falha == 0:
         logger.info(f"Automação finalizada com sucesso total: {itens_sucesso}/{total_itens} CNPJ(s) processados com êxito.")
@@ -2063,6 +2316,7 @@ def executar_robo_hibrido(
     else:
         logger.warning(
             f"Automação finalizada com pendências: {itens_sucesso} sucesso(s), "
+            f"{itens_2fa} bloqueado(s) por 2FA, "
             f"{itens_falha} pendência(s)/falha(s) de {total_itens} CNPJ(s)."
         )
         return False
