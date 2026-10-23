@@ -761,11 +761,11 @@ def executar_rotatividade_antigos(pasta: Path, eh_pasta: bool, min_itens: int = 
 
 def exibir_alerta_planilha_inexistente(caminho_criado: Path):
     mensagem = (
-        "A Planilha de referência para consulta de CNPJs não existia.\n\n"
-        f"A planilha foi criada no caminho:\n{caminho_criado}\n\n"
-        "Por favor, preencha com os CNPJs na coluna 'CNPJ' e o nome do certificado na coluna 'Certificado', e execute o robô novamente."
+        "A Planilha de referência para consulta de CNPJs não existia.\n"
+        f"A planilha modelo foi criada automaticamente no caminho:\n{caminho_criado}\n"
+        "Por favor, preencha com os CNPJs na coluna 'CNPJ' e o certificado na coluna 'Certificado', e execute o robô novamente."
     )
-    ctypes.windll.user32.MessageBoxW(0, mensagem, "Planilha de Referência não existe", 0x30)
+    logger.warning(mensagem)
 
 
 def efetuar_logout_det(page):
@@ -1892,12 +1892,17 @@ def executar_robo_hibrido(
     pasta_logs = base_dir / "Logs"
     pasta_relatorios = base_dir / "Relatorios"
 
+    # Garante a existência prévia das pastas da automação
+    pasta_logs.mkdir(parents=True, exist_ok=True)
+    screenshots_raiz.mkdir(parents=True, exist_ok=True)
+    pasta_relatorios.mkdir(parents=True, exist_ok=True)
+
     # Rotatividade de histórico: exclui itens com mais de 60 dias se houver 10 ou mais itens
     executar_rotatividade_antigos(pasta_logs, eh_pasta=False, min_itens=10, limite_dias=60)
     executar_rotatividade_antigos(screenshots_raiz, eh_pasta=True, min_itens=10, limite_dias=60)
     executar_rotatividade_antigos(pasta_relatorios, eh_pasta=False, min_itens=10, limite_dias=60)
 
-    # 1. Verificação da Planilha de Entrada
+    # 1. Verificação da Planilha de Entrada (se não existir, é criada automaticamente)
     if not excel_path.exists():
         logger.error(f"Planilha de CNPJs não encontrada em: {excel_path}")
         try:
@@ -1907,13 +1912,18 @@ def executar_robo_hibrido(
             ws.title = "Documentos"
             ws["A1"] = "CNPJ"
             ws["B1"] = "Certificado"
+            header_font = Font(bold=True)
+            ws["A1"].font = header_font
+            ws["B1"].font = header_font
+            ws.column_dimensions["A"].width = 25
+            ws.column_dimensions["B"].width = 30
             wb.save(str(excel_path))
             wb.close()
-            logger.info(f"Planilha modelo criada com sucesso em: {excel_path}")
+            logger.info(f"Planilha modelo criada automaticamente com sucesso em: {excel_path}")
         except Exception as e:
             logger.error(f"Falha ao criar planilha modelo: {e}")
         exibir_alerta_planilha_inexistente(excel_path)
-        return
+        return False
 
     # Leitura das linhas da planilha: Coluna A = CNPJ, Coluna B = Certificado
     try:
@@ -1930,7 +1940,7 @@ def executar_robo_hibrido(
         wb.close()
     except Exception as e:
         logger.error(f"Erro ao ler a planilha {excel_path}: {e}")
-        return
+        return False
 
     # Filtra cabeçalhos conhecidos
     header_names = {"CNPJ_OU_CPF", "CNPJ_E_CPF", "CNPJS_E_CPFS", "CNPJ", "CPF", "DOCUMENTO", "DOCUMENTOS"}
@@ -1943,7 +1953,7 @@ def executar_robo_hibrido(
         logger.warning(
             f"A planilha em '{excel_path}' não contém CNPJs para processar. Preencha e inicie novamente."
         )
-        return
+        return False
 
     # Inicializa o mapa de rastreamento de cada CNPJ para o relatório de execução
     mapa_itens: dict[str, ItemExecucao] = {
@@ -1951,33 +1961,18 @@ def executar_robo_hibrido(
         for doc, cert in dados_filtrados
     }
 
-    # Validação prévia de tamanho (estritamente 14 dígitos numéricos para CNPJ)
-    for doc, it in mapa_itens.items():
-        digits = re.sub(r"\D", "", doc)
-        if len(digits) != 14:
-            it.status_t1 = "CNPJ_INVALIDO"
-            it.detalhe_t1 = f"Tamanho incorreto ({len(digits)} dígitos em vez de 14)"
-            it.status_final = "CNPJ_INVALIDO"
-            it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            logger.warning(
-                f"[CNPJ INVÁLIDO] O documento '{doc}' possui {len(digits)} dígitos (esperado 14 para CNPJ). "
-                f"Será ignorado da consulta no DET."
-            )
-
-    # Agrupamento inteligente por certificado apenas dos itens com tamanho válido
+    # Agrupamento por certificado de todos os CNPJs da planilha (sem validação de formato prévia)
     grupos_certificados = defaultdict(list)
     for doc, cert in dados_filtrados:
-        if mapa_itens[doc].status_final != "CNPJ_INVALIDO":
-            cert_chave = cert.strip()
-            grupos_certificados[cert_chave].append(doc)
+        cert_chave = cert.strip()
+        grupos_certificados[cert_chave].append(doc)
 
     total_itens = len(dados_filtrados)
-    total_validos = sum(len(v) for v in grupos_certificados.values())
     total_grupos = len(grupos_certificados)
 
     logger.info(
-        f"Planilha carregada com sucesso. Total de itens: {total_itens} "
-        f"({total_validos} com tamanho válido distribuídos em {total_grupos} grupo(s) de certificado)."
+        f"Planilha carregada com sucesso. Total de CNPJs: {total_itens} "
+        f"distribuídos em {total_grupos} grupo(s) de certificado."
     )
     if progress_callback:
         progress_callback(0, total_itens, f"Iniciando automação... (0/{total_itens})")
@@ -2052,7 +2047,17 @@ def executar_robo_hibrido(
         salvar_relatorio_execucao(base_dir, execucao_dt_str, list(mapa_itens.values()))
         salvar_planilha_pendentes(base_dir, list(mapa_itens.values()))
 
-    logger.info("Automação de todos os certificados e CNPJs finalizada com sucesso.")
+    itens_sucesso = sum(1 for it in mapa_itens.values() if it.status_final == "SUCESSO")
+    itens_falha = total_itens - itens_sucesso
+    if itens_falha == 0:
+        logger.info(f"Automação finalizada com sucesso total: {itens_sucesso}/{total_itens} CNPJ(s) processados com êxito.")
+        return True
+    else:
+        logger.warning(
+            f"Automação finalizada com pendências: {itens_sucesso} sucesso(s), "
+            f"{itens_falha} pendência(s)/falha(s) de {total_itens} CNPJ(s)."
+        )
+        return False
 
 
 
