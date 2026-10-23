@@ -756,10 +756,32 @@ def processar_item_det(
         time.sleep(2)
         formatted_dt = datetime.now().strftime("%d%m%Y_%H%M%S")
 
-        # 1. Primeiro: clica em 'Exibir apenas não lidas'
-        etapa = "Filtrando por mensagens não lidas"
+        # Aguarda a tela da Caixa Postal carregar
+        try:
+            page.locator("h1:has-text('Caixa Postal'), h2:has-text('Caixa Postal'), span:has-text('Caixa de Entrada')").first.wait_for(state="visible", timeout=15000)
+        except Exception:
+            pass
         time.sleep(DELAY_ENTRE_ACOES_S)
 
+        # 1. Print ANTES de clicar em 'Exibir apenas não lidas' (visão geral / todas)
+        etapa = "Tirando print da Caixa Postal antes do filtro"
+        try:
+            page.mouse.move(0, 0)
+            time.sleep(0.3)
+            page.evaluate("""() => {
+                const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                tooltips.forEach(t => t.remove());
+            }""")
+        except Exception:
+            pass
+
+        caminho_print_antes = pasta_caixa_postal / f"{item_id}_{formatted_dt}_parte1_todas.jpg"
+        page.screenshot(path=str(caminho_print_antes), type="jpeg")
+        log_etapa(item_id, etapa, f"Print da Caixa Postal (antes do filtro / todas) realizado com sucesso: {caminho_print_antes.name}")
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
+        # 2. Clica em 'Exibir apenas não lidas'
+        etapa = "Filtrando por mensagens não lidas"
         loc_nao_lidas_filtro = page.locator(
             "span:has-text('Exibir apenas não lidas'), "
             "a:has-text('Exibir apenas não lidas'), "
@@ -797,8 +819,8 @@ def processar_item_det(
             else:
                 log_etapa(item_id, etapa, "Aviso: opção 'Exibir apenas não lidas' não foi localizada.")
 
-        # 2. Depois de filtrar: verifica se há mensagens não lidas na tela e tira o print
-        etapa = "Tirando o print da Caixa Postal"
+        # 3. Depois de filtrar: verifica se há mensagens não lidas na tela
+        etapa = "Tirando print da Caixa Postal após o filtro"
         time.sleep(0.5)
 
         loc_nao_lidas = page.locator(
@@ -839,7 +861,7 @@ def processar_item_det(
             logger.warning(f"Erro ao verificar mensagens não lidas: {e}")
             tem_msg_nao_lida = False
 
-        # Tira SEMPRE o print da Caixa Postal (mesmo vazia ou sem não lidas)
+        # Tira SEMPRE o print após o filtro (mostrando apenas não lidas ou comprovando que não há nenhuma)
         time.sleep(DELAY_ENTRE_ACOES_S)
         try:
             page.mouse.move(0, 0)
@@ -851,12 +873,12 @@ def processar_item_det(
         except Exception:
             pass
 
-        caminho_print_cp = pasta_caixa_postal / f"{item_id}_{formatted_dt}.jpg"
-        page.screenshot(path=str(caminho_print_cp), type="jpeg")
+        caminho_print_depois = pasta_caixa_postal / f"{item_id}_{formatted_dt}_parte2_nao_lidas.jpg"
+        page.screenshot(path=str(caminho_print_depois), type="jpeg")
         if tem_msg_nao_lida:
-            log_etapa(item_id, etapa, f"Print da Caixa Postal realizado com sucesso (mensagens não lidas encontradas): {caminho_print_cp.name}")
+            log_etapa(item_id, etapa, f"Print da Caixa Postal (após filtro / não lidas encontradas) realizado com sucesso: {caminho_print_depois.name}")
         else:
-            log_etapa(item_id, etapa, f"Print da Caixa Postal realizado com sucesso (sem mensagens não lidas / vazia): {caminho_print_cp.name}")
+            log_etapa(item_id, etapa, f"Print da Caixa Postal (após filtro / sem não lidas) realizado com sucesso: {caminho_print_depois.name}")
         time.sleep(DELAY_ENTRE_ACOES_S)
 
         # Volta para a tela de Serviços
