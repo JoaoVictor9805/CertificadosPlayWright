@@ -1144,8 +1144,10 @@ def executar_robo_hibrido(
         if legado_path.exists():
             excel_path = legado_path
 
-    screenshots_dir = base_dir / "CapturasDeTela"
     hoje_date = datetime.now().date()
+    execucao_dt_str = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
+    screenshots_raiz = base_dir / "CapturasDeTela"
+    screenshots_dir = screenshots_raiz / execucao_dt_str
 
     # 1. Verificação da Planilha de Entrada
     if not excel_path.exists():
@@ -1211,6 +1213,7 @@ def executar_robo_hibrido(
         progress_callback(0, total_itens, f"Iniciando automação... (0/{total_itens})")
 
     limpar_ou_criar_pasta(screenshots_dir)
+    logger.info(f"Pasta de capturas desta execução: {screenshots_dir}")
 
     item_global_idx = 0
 
