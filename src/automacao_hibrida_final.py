@@ -766,24 +766,25 @@ def processar_item_det(
             logger.warning(f"Erro ao verificar mensagens não lidas: {e}")
             tem_msg_nao_lida = False
 
-        if tem_msg_nao_lida:
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            try:
-                page.mouse.move(0, 0)
-                time.sleep(0.6)
-                page.evaluate("""() => {
-                    const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
-                    tooltips.forEach(t => t.remove());
-                }""")
-            except Exception:
-                pass
+        # Tira SEMPRE o print da Caixa Postal (mesmo vazia ou sem não lidas)
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        try:
+            page.mouse.move(0, 0)
+            time.sleep(0.6)
+            page.evaluate("""() => {
+                const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                tooltips.forEach(t => t.remove());
+            }""")
+        except Exception:
+            pass
 
-            caminho_print_cp = pasta_caixa_postal / f"{item_id}_{formatted_dt}.jpg"
-            page.screenshot(path=str(caminho_print_cp), type="jpeg")
-            log_etapa(item_id, etapa, "Print da Caixa Postal realizado com sucesso (mensagem não lida encontrada após filtro).")
-            time.sleep(DELAY_ENTRE_ACOES_S)
+        caminho_print_cp = pasta_caixa_postal / f"{item_id}_{formatted_dt}.jpg"
+        page.screenshot(path=str(caminho_print_cp), type="jpeg")
+        if tem_msg_nao_lida:
+            log_etapa(item_id, etapa, f"Print da Caixa Postal realizado com sucesso (mensagens não lidas encontradas): {caminho_print_cp.name}")
         else:
-            log_etapa(item_id, etapa, "Nenhuma mensagem não lida encontrada na Caixa Postal.")
+            log_etapa(item_id, etapa, f"Print da Caixa Postal realizado com sucesso (sem mensagens não lidas / vazia): {caminho_print_cp.name}")
+        time.sleep(DELAY_ENTRE_ACOES_S)
 
         # Volta para a tela de Serviços
         time.sleep(DELAY_ENTRE_ACOES_S)
@@ -857,7 +858,24 @@ def processar_item_det(
                 dados_linhas.append((idx, texto_data, valida))
 
             if not existe_notificacao_valida:
-                log_etapa(item_id, etapa, "Nenhuma notificação possui data válida e o print foi ignorado.")
+                try:
+                    page.mouse.move(0, 0)
+                    time.sleep(0.3)
+                    page.evaluate("""() => {
+                        const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                        tooltips.forEach(t => t.remove());
+                    }""")
+                except Exception:
+                    pass
+
+                caminho_print_notif = pasta_notificacao / f"{item_id}_{formatted_dt}.jpg"
+                page.screenshot(path=str(caminho_print_notif), type="jpeg")
+                log_etapa(
+                    item_id,
+                    etapa,
+                    f"Print da tela de Notificação (nenhuma válida por data) realizado com sucesso: {caminho_print_notif.name}",
+                )
+                time.sleep(DELAY_ENTRE_ACOES_S)
             else:
                 # --- CAPTURA DE PRINTS DE TELA INTEIRA (SEM DUPLICAÇÃO) ---
                 etapa = "Tirando prints da tela de Notificações"
@@ -1065,7 +1083,21 @@ def processar_item_det(
                         f"Linha {idx} ignorada: data {texto_data} fora do critério (ModoTeste={MODO_TESTE}, hoje={hoje_date.strftime('%d/%m/%Y')})",
                     )
         else:
-            log_etapa(item_id, etapa, "Nenhuma notificação listada na tela de Notificação")
+            # Tabela vazia: tira o print de comprovação da tela de notificações vazia
+            try:
+                page.mouse.move(0, 0)
+                time.sleep(0.3)
+                page.evaluate("""() => {
+                    const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                    tooltips.forEach(t => t.remove());
+                }""")
+            except Exception:
+                pass
+
+            caminho_print_notif = pasta_notificacao / f"{item_id}_{formatted_dt}.jpg"
+            page.screenshot(path=str(caminho_print_notif), type="jpeg")
+            log_etapa(item_id, etapa, f"Print da tela de Notificação (vazia / sem notificações) realizado com sucesso: {caminho_print_notif.name}")
+            time.sleep(DELAY_ENTRE_ACOES_S)
 
         # Retorna à tela de serviços
         time.sleep(DELAY_ENTRE_ACOES_S)
