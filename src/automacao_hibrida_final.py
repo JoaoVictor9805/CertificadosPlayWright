@@ -542,6 +542,83 @@ def remover_pastas_vazias_do_item(pasta_item: Path):
             pass
 
 
+def obter_data_criacao(item: Path) -> datetime:
+    """
+    Retorna a data de criação do arquivo ou pasta.
+    Tenta primeiro interpretar o timestamp no nome (ex: 23-10-2026_11-44-10 ou log_execucao_2026-10-23_11-44-10.txt),
+    e como fallback utiliza a data de criação/modificação do sistema de arquivos.
+    """
+    nome = item.stem
+    padroes = [
+        r"(\d{2}-\d{2}-\d{4}_\d{2}-\d{2}-\d{2})",  # 23-10-2026_11-44-10
+        r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})",  # 2026-10-23_11-44-10
+    ]
+    for padrao in padroes:
+        m = re.search(padrao, nome)
+        if m:
+            texto_data = m.group(1)
+            for fmt in ("%d-%m-%Y_%H-%M-%S", "%Y-%m-%d_%H-%M-%S"):
+                try:
+                    return datetime.strptime(texto_data, fmt)
+                except ValueError:
+                    pass
+
+    stat = item.stat()
+    timestamp = getattr(stat, "st_birthtime", None) or stat.st_ctime
+    return datetime.fromtimestamp(timestamp)
+
+
+def executar_rotatividade_antigos(pasta: Path, eh_pasta: bool, min_itens: int = 10, limite_dias: int = 60):
+    """
+    Sempre que houver pelo menos `min_itens` (10 itens) na pasta,
+    exclui os itens mais antigos caso sua data de criação seja 60 dias ou mais anterior à data atual.
+    """
+    if not pasta.exists():
+        return
+
+    try:
+        if eh_pasta:
+            itens = [p for p in pasta.iterdir() if p.is_dir()]
+        else:
+            itens = [f for f in pasta.iterdir() if f.is_file() and f.suffix.lower() == ".txt"]
+
+        if len(itens) < min_itens:
+            return
+
+        itens_com_data = []
+        for it in itens:
+            try:
+                dt = obter_data_criacao(it)
+                itens_com_data.append((it, dt))
+            except Exception:
+                pass
+
+        # Ordena do mais antigo para o mais recente
+        itens_com_data.sort(key=lambda x: x[1])
+
+        agora = datetime.now()
+        removidos = 0
+
+        for it, dt in itens_com_data:
+            dias_idade = (agora - dt).days
+            if dias_idade >= limite_dias:
+                try:
+                    if eh_pasta:
+                        shutil.rmtree(it)
+                        logger.info(f"[LIMPEZA HISTÓRICO] Pasta de capturas antiga removida: {it.name} ({dias_idade} dias de criação).")
+                    else:
+                        it.unlink()
+                        logger.info(f"[LIMPEZA HISTÓRICO] Arquivo de log antigo removido: {it.name} ({dias_idade} dias de criação).")
+                    removidos += 1
+                except Exception as e_del:
+                    logger.warning(f"[LIMPEZA HISTÓRICO] Não foi possível remover {it.name}: {e_del}")
+
+        if removidos > 0:
+            logger.info(f"[LIMPEZA HISTÓRICO] Total de {removidos} item(ns) com mais de {limite_dias} dias removido(s) de '{pasta.name}'.")
+    except Exception as e:
+        logger.warning(f"[LIMPEZA HISTÓRICO] Erro ao verificar rotatividade em '{pasta}': {e}")
+
+
 def exibir_alerta_planilha_inexistente(caminho_criado: Path):
     mensagem = (
         "A Planilha de referência para consulta de CNPJs não existia.\n\n"
@@ -1148,6 +1225,11 @@ def executar_robo_hibrido(
     execucao_dt_str = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
     screenshots_raiz = base_dir / "CapturasDeTela"
     screenshots_dir = screenshots_raiz / execucao_dt_str
+
+    # Rotatividade de histórico: exclui itens com mais de 60 dias se houver 10 ou mais itens
+    pasta_logs = base_dir / "Logs"
+    executar_rotatividade_antigos(pasta_logs, eh_pasta=False, min_itens=10, limite_dias=60)
+    executar_rotatividade_antigos(screenshots_raiz, eh_pasta=True, min_itens=10, limite_dias=60)
 
     # 1. Verificação da Planilha de Entrada
     if not excel_path.exists():
