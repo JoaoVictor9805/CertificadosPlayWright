@@ -1874,16 +1874,21 @@ def executar_robo_hibrido(
     base_dir: Path,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
+    planilha_especifica: Optional[str] = None,
 ):
     if not base_dir:
         raise ValueError("O parâmetro 'base_dir' é obrigatório para executar o robô.")
     base_dir = Path(base_dir).resolve()
 
-    excel_path = base_dir / "CNPJs.xlsx"
-    if not excel_path.exists():
-        legado_path = base_dir / "CNPJs-e-CPFs.xlsx"
-        if legado_path.exists():
-            excel_path = legado_path
+    if planilha_especifica:
+        p = Path(planilha_especifica)
+        excel_path = p if p.is_absolute() else base_dir / p
+    else:
+        excel_path = base_dir / "CNPJs.xlsx"
+        if not excel_path.exists():
+            legado_path = base_dir / "CNPJs-e-CPFs.xlsx"
+            if legado_path.exists():
+                excel_path = legado_path
 
     hoje_date = datetime.now().date()
     execucao_dt_str = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
@@ -1902,8 +1907,11 @@ def executar_robo_hibrido(
     executar_rotatividade_antigos(screenshots_raiz, eh_pasta=True, min_itens=10, limite_dias=60)
     executar_rotatividade_antigos(pasta_relatorios, eh_pasta=False, min_itens=10, limite_dias=60)
 
-    # 1. Verificação da Planilha de Entrada (se não existir, é criada automaticamente)
+    # 1. Verificação da Planilha de Entrada (se não existir, é criada automaticamente se for a padrão)
     if not excel_path.exists():
+        if planilha_especifica:
+            logger.info(f"A planilha '{excel_path.name}' não foi encontrada em '{base_dir}'. Não há itens pendentes a processar.")
+            return True
         logger.error(f"Planilha de CNPJs não encontrada em: {excel_path}")
         try:
             base_dir.mkdir(parents=True, exist_ok=True)

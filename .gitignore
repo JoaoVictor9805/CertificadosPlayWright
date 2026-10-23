@@ -17,3 +17,8 @@ ENV/
 # User data & logs
 User Data_RoboDET/
 *.log
+Logs/
+CapturasDeTela/
+Relatorios/
+CNPJs.xlsx
+CNPJs_Pendentes.xlsx

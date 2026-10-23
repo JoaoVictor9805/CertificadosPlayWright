@@ -57,10 +57,10 @@ def configurar_logger(pasta_base: Path) -> Path:
     return arquivo_log
 
 
-def obter_caminho_base() -> Path:
+def obter_argumentos() -> tuple[Path, Optional[str]]:
     """
-    Obtém o caminho da pasta base da automação estritamente via linha de comando.
-    Se não for informado, encerra imediatamente com erro sem nenhuma interação com o usuário.
+    Obtém o caminho da pasta base e argumentos opcionais de linha de comando.
+    Se o caminho não for informado, encerra imediatamente com erro sem interação com o usuário.
     """
     parser = argparse.ArgumentParser(
         description="Automação DET - Consulta de Notificações e Certificados (Linha de Comando)"
@@ -78,6 +78,20 @@ def obter_caminho_base() -> Path:
         default=None,
         help="Caminho alternativo da pasta da automação",
     )
+    parser.add_argument(
+        "-p",
+        "--pendentes",
+        dest="apenas_pendentes",
+        action="store_true",
+        help="Executa a automação processando a planilha 'CNPJs_Pendentes.xlsx'",
+    )
+    parser.add_argument(
+        "-a",
+        "--arquivo",
+        dest="arquivo_planilha",
+        default=None,
+        help="Nome ou caminho de uma planilha Excel específica (ex: CNPJs_Pendentes.xlsx)",
+    )
 
     args, _ = parser.parse_known_args()
 
@@ -87,14 +101,23 @@ def obter_caminho_base() -> Path:
         print("=" * 70, file=sys.stderr)
         print("[ERRO] É obrigatório informar o caminho da pasta para executar a automação.", file=sys.stderr)
         print("Uso: python main.py \"C:\\caminho\\da\\pasta\"", file=sys.stderr)
+        print("Opções adicionais:", file=sys.stderr)
+        print("  -p, --pendentes   Executa apenas os CNPJs pendentes (CNPJs_Pendentes.xlsx)", file=sys.stderr)
+        print("  -a, --arquivo     Informa o nome de uma planilha específica", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(1)
 
-    return Path(caminho_informado).resolve()
+    planilha_especifica = None
+    if args.apenas_pendentes:
+        planilha_especifica = "CNPJs_Pendentes.xlsx"
+    elif args.arquivo_planilha:
+        planilha_especifica = args.arquivo_planilha
+
+    return Path(caminho_informado).resolve(), planilha_especifica
 
 
 def main():
-    pasta_base = obter_caminho_base()
+    pasta_base, planilha_especifica = obter_argumentos()
 
     # Garante que a pasta base existe
     try:
@@ -109,6 +132,8 @@ def main():
     logger.info("=" * 70)
     logger.info("INICIANDO AUTOMAÇÃO DET (MODO LINHA DE COMANDO)")
     logger.info(f"Pasta Base: {pasta_base}")
+    if planilha_especifica:
+        logger.info(f"Planilha Alvo: {planilha_especifica}")
     logger.info(f"Arquivo de Log: {arquivo_log}")
     logger.info("=" * 70)
 
@@ -121,6 +146,7 @@ def main():
         sucesso = executar_robo_hibrido(
             base_dir=pasta_base,
             progress_callback=callback_progresso,
+            planilha_especifica=planilha_especifica,
         )
         if sucesso:
             logger.info("AUTOMAÇÃO FINALIZADA COM SUCESSO!")
