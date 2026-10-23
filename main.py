@@ -59,10 +59,8 @@ def configurar_logger(pasta_base: Path) -> Path:
 
 def obter_caminho_base() -> Path:
     """
-    Obtém o caminho da pasta base da automação:
-    1. Argumento de linha de comando (--caminho / -c ou primeiro argumento posicional).
-    2. Pergunta obrigatoriamente ao usuário no terminal interativo.
-    3. Encerra com erro se executado de forma não interativa sem argumento.
+    Obtém o caminho da pasta base da automação estritamente via linha de comando.
+    Se não for informado, encerra imediatamente com erro sem nenhuma interação com o usuário.
     """
     parser = argparse.ArgumentParser(
         description="Automação DET - Consulta de Notificações e Certificados (Linha de Comando)"
@@ -85,28 +83,14 @@ def obter_caminho_base() -> Path:
 
     caminho_informado = args.caminho_flag or args.caminho_posicional
 
-    if caminho_informado:
-        return Path(caminho_informado).resolve()
+    if not caminho_informado or not str(caminho_informado).strip():
+        print("=" * 70, file=sys.stderr)
+        print("[ERRO] É obrigatório informar o caminho da pasta para executar a automação.", file=sys.stderr)
+        print("Uso: python main.py \"C:\\caminho\\da\\pasta\"", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
 
-    # Se for terminal interativo, exige que o usuário informe o caminho
-    if sys.stdin.isatty():
-        print("=" * 70)
-        print("        AUTOMAÇÃO DET - CONSULTA DE NOTIFICAÇÕES E CERTIFICADOS")
-        print("=" * 70)
-        while True:
-            try:
-                entrada = input("Informe o caminho da pasta da automação: ").strip()
-                if entrada:
-                    return Path(entrada).resolve()
-                print("[AVISO] O caminho é obrigatório. Por favor, digite o caminho da pasta.")
-            except (EOFError, KeyboardInterrupt):
-                print("\nExecução cancelada pelo usuário.")
-                sys.exit(0)
-
-    # Erro para execuções sem terminal interativo onde o argumento foi omitido
-    print("[ERRO CRÍTICO] O caminho da pasta base é obrigatório para executar a automação.", file=sys.stderr)
-    print("Exemplo de uso: python main.py \"C:\\caminho\\da\\pasta\"", file=sys.stderr)
-    sys.exit(1)
+    return Path(caminho_informado).resolve()
 
 
 def main():
