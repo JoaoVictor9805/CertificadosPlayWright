@@ -28,10 +28,6 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 # ==============================================================================
 # CONFIGURAÇÕES E CAMINHOS
 # ==============================================================================
-BASE_DIR = Path(r"Z:\Temp\SOCIETARIO\AutomacaoCertificados")
-EXCEL_PATH = BASE_DIR / "CNPJs.xlsx"
-SCREENSHOTS_DIR = BASE_DIR / "CapturasDeTela"
-
 URL_LOGIN = "https://det.sit.trabalho.gov.br/login"
 URL_SERVICOS = "https://det.sit.trabalho.gov.br/servicos"
 
@@ -1206,14 +1202,13 @@ def processar_item_det(
 # FLUXO PRINCIPAL DA AUTOMAÇÃO HÍBRIDA
 # ==============================================================================
 def executar_robo_hibrido(
-    base_dir: Optional[Path] = None,
+    base_dir: Path,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
 ):
-    if base_dir is None:
-        base_dir = BASE_DIR
-    else:
-        base_dir = Path(base_dir)
+    if not base_dir:
+        raise ValueError("O parâmetro 'base_dir' é obrigatório para executar o robô.")
+    base_dir = Path(base_dir).resolve()
 
     excel_path = base_dir / "CNPJs.xlsx"
     if not excel_path.exists():

@@ -20,7 +20,7 @@ if str(SRC_DIR) not in sys.path:
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.automacao_hibrida_final import BASE_DIR as BASE_DIR_PADRAO, executar_robo_hibrido
+from src.automacao_hibrida_final import executar_robo_hibrido
 
 
 def configurar_logger(pasta_base: Path) -> Path:
@@ -61,8 +61,8 @@ def obter_caminho_base() -> Path:
     """
     Obtém o caminho da pasta base da automação:
     1. Argumento de linha de comando (--caminho / -c ou primeiro argumento posicional).
-    2. Pergunta ao usuário no terminal interativo (com valor padrão ao pressionar Enter).
-    3. Valor padrão se executado de forma não interativa (ex: Task Scheduler sem args).
+    2. Pergunta obrigatoriamente ao usuário no terminal interativo.
+    3. Encerra com erro se executado de forma não interativa sem argumento.
     """
     parser = argparse.ArgumentParser(
         description="Automação DET - Consulta de Notificações e Certificados (Linha de Comando)"
@@ -88,22 +88,25 @@ def obter_caminho_base() -> Path:
     if caminho_informado:
         return Path(caminho_informado).resolve()
 
-    # Se for terminal interativo, pergunta ao usuário
+    # Se for terminal interativo, exige que o usuário informe o caminho
     if sys.stdin.isatty():
         print("=" * 70)
         print("        AUTOMAÇÃO DET - CONSULTA DE NOTIFICAÇÕES E CERTIFICADOS")
         print("=" * 70)
-        print(f"Caminho padrão: {BASE_DIR_PADRAO}")
-        try:
-            entrada = input("Informe o caminho da pasta da automação [Pressione ENTER para o padrão]: ").strip()
-            if entrada:
-                return Path(entrada).resolve()
-        except (EOFError, KeyboardInterrupt):
-            print("\nExecução cancelada pelo usuário.")
-            sys.exit(0)
+        while True:
+            try:
+                entrada = input("Informe o caminho da pasta da automação: ").strip()
+                if entrada:
+                    return Path(entrada).resolve()
+                print("[AVISO] O caminho é obrigatório. Por favor, digite o caminho da pasta.")
+            except (EOFError, KeyboardInterrupt):
+                print("\nExecução cancelada pelo usuário.")
+                sys.exit(0)
 
-    # Padrão automático para execuções agendadas ou sem digitação
-    return BASE_DIR_PADRAO.resolve()
+    # Erro para execuções sem terminal interativo onde o argumento foi omitido
+    print("[ERRO CRÍTICO] O caminho da pasta base é obrigatório para executar a automação.", file=sys.stderr)
+    print("Exemplo de uso: python main.py \"C:\\caminho\\da\\pasta\"", file=sys.stderr)
+    sys.exit(1)
 
 
 def main():
