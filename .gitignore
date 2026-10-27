@@ -16,6 +16,7 @@ ENV/
 
 # User data & logs
 User Data_RoboDET/
+User Data_RoboSocietario/
 *.log
 Logs/
 CapturasDeTela/

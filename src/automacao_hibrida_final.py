@@ -21,9 +21,10 @@ from pathlib import Path
 from PIL import Image
 
 import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import pyautogui
+pyautogui.FAILSAFE = False
 from pywinauto import Desktop
 from pywinauto.keyboard import send_keys
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -36,14 +37,14 @@ URL_SERVICOS = "https://det.sit.trabalho.gov.br/servicos"
 
 # ModoTeste = True: considera notificações com data <= hoje (testes).
 # Em produção, trocar para False (data >= hoje).
-MODO_TESTE = True
+MODO_TESTE = False
 
 # Diretório base padrão para depuração e caminhos de fallback
 BASE_DIR = Path.cwd()
 
 # Configurações do Chrome Real e Porta CDP
 CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-CHROME_USER_DATA = Path(os.environ["LOCALAPPDATA"]) / "Google" / "Chrome" / "User Data_RoboDET"
+CHROME_USER_DATA = Path(os.environ["LOCALAPPDATA"]) / "Google" / "Chrome" / "User Data_RoboSocietario"
 CDP_PORT = 9222
 
 # Delays para acompanhamento visual do usuário (0.5s entre ações)
@@ -80,6 +81,22 @@ def obter_caminho_recurso(caminho_relativo: str) -> Path:
     return script_dir.parent / caminho_relativo
 
 
+def sanitizar_nome_pasta(cert_nome: str) -> str:
+    """
+    Sanitiza o nome do certificado para uso seguro como nome de pasta no Windows,
+    removendo caracteres inválidos (\\/*?:"<>|) e limitando o tamanho.
+    Exemplo: 'FALAVINHA NEXT ASSESSORIA:20791304000121' -> 'FALAVINHA NEXT ASSESSORIA_20791304000121'
+    """
+    if not cert_nome:
+        return "Certificado_Padrao"
+    nome_limpo = re.sub(r'[\\/*?:"<>|]', "_", str(cert_nome).strip())
+    nome_limpo = re.sub(r'\s+', " ", nome_limpo)
+    nome_limpo = re.sub(r'_+', "_", nome_limpo).strip(" ._")
+    if not nome_limpo:
+        return "Certificado"
+    return nome_limpo[:60].strip(" ._")
+
+
 # Imagens de referência para o login físico via PyAutoGUI (procura em assets/ e fallback)
 _caminho_assets = obter_caminho_recurso("assets/capturasDeTela")
 if _caminho_assets.exists():
@@ -105,9 +122,9 @@ class VerificacaoDuasEtapasException(Exception):
     pass
 
 # ==============================================================================
-# LOGGER DA APLICAÇÃO (RoboDET)
+# LOGGER DA APLICAÇÃO (RoboSocietario)
 # ==============================================================================
-logger = logging.getLogger("RoboDET")
+logger = logging.getLogger("RoboSocietario")
 
 
 def log_etapa(item_id: str, etapa: str, msg: str):
@@ -122,33 +139,76 @@ def porta_em_uso(porta: int) -> bool:
         return s.connect_ex(("127.0.0.1", porta)) == 0
 
 
+def matar_processos_chrome_automacao():
+    """
+    Encerra de forma forçada e definitiva todos os processos do Chrome vinculados
+    à automação (porta 9222 ou pasta User Data_RoboSocietario), matando a árvore
+    completa de processos para evitar processos zumbis sem afetar o Chrome pessoal do usuário.
+    """
+    global CHROME_PROC
+
+    # 1. Se temos a referência do subprocess.Popen, encerra a árvore inteira via taskkill /F /T
+    if CHROME_PROC is not None:
+        try:
+            pid = CHROME_PROC.pid
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception:
+            pass
+        CHROME_PROC = None
+
+    # 2. Encerra qualquer processo escutando na porta CDP (9222)
+    try:
+        resultado = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        pids_para_matar = set()
+        for linha in resultado.stdout.splitlines():
+            partes = linha.strip().split()
+            if len(partes) >= 5 and f":{CDP_PORT}" in partes[1] and "LISTENING" in partes:
+                pid_str = partes[-1]
+                if pid_str.isdigit() and int(pid_str) > 0:
+                    pids_para_matar.add(pid_str)
+        for p_id in pids_para_matar:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", p_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+    except Exception:
+        pass
+
+    # 3. Como garantia adicional, encerra processos chrome.exe associados ao perfil 'User Data_RoboSocietario'
+    try:
+        ps_cmd = (
+            "& { Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -eq 'chrome.exe' -and $_.CommandLine -like '*User Data_RoboSocietario*' } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=6,
+        )
+    except Exception:
+        pass
+
+
 def liberar_porta_se_ocupada():
     """Fecha processos órfãos na porta CDP para garantir uma inicialização limpa."""
     if porta_em_uso(CDP_PORT):
-        logger.info(f"Porta {CDP_PORT} em uso. Tentando fechar instância anterior...")
-        try:
-            with sync_playwright() as p:
-                b = p.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
-                ctx = b.contexts[0]
-                page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                cdp = ctx.new_cdp_session(page)
-                cdp.send("Browser.close")
-                time.sleep(1)
-        except Exception:
-            pass
-
-        # Se ainda estiver em uso, tenta fechar a janela via UIA
-        if porta_em_uso(CDP_PORT):
-            try:
-                desktop = Desktop(backend="uia")
-                for win in desktop.windows():
-                    cls = win.class_name()
-                    txt = win.window_text()
-                    if cls == "Chrome_WidgetWin_1" and any(k in txt for k in ["Chrome", "DET", "gov.br"]):
-                        win.close()
-            except Exception:
-                pass
-            time.sleep(1)
+        logger.info(f"Porta {CDP_PORT} em uso. Encerrando processos anteriores da automação...")
+        matar_processos_chrome_automacao()
+        time.sleep(1)
 
 
 CHROME_PROC: Optional[subprocess.Popen] = None
@@ -179,16 +239,40 @@ def iniciar_chrome_hibrido():
         time.sleep(0.5)
 
 
-def focar_janela_segura(win):
-    """Garante foco na janela do Chrome para recepção de eventos físicos."""
+def focar_janela_segura(win, maximizar: bool = False):
+    """
+    Garante foco e primeiro plano absoluto na janela alvo,
+    contornando restrições de roubo de foco do Agendador de Tarefas do Windows
+    usando HWND_TOPMOST temporário e simulação de tecla de sistema (ALT).
+    """
     try:
-        hwnd = win.handle
-        if ctypes.windll.user32.IsIconic(hwnd):
-            ctypes.windll.user32.ShowWindow(hwnd, 9)
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
-        time.sleep(0.5)
-    except Exception:
-        pass
+        hwnd = win.handle if hasattr(win, "handle") else int(win)
+        user32 = ctypes.windll.user32
+
+        # 1. Se estiver minimizada, restaura para exibição normal
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+
+        # 2. Simulação da tecla ALT para contornar o bloqueio de ForegroundLock do Windows
+        user32.keybd_event(0x12, 0, 0, 0)  # ALT pressionado
+        user32.keybd_event(0x12, 0, 2, 0)  # ALT liberado
+
+        # 3. Força a janela para o topo absoluto (TOPMOST) e remove o pino em seguida
+        HWND_TOPMOST = -1
+        HWND_NOTOPMOST = -2
+        SWP_FLAGS = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_FLAGS)
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_FLAGS)
+
+        # 4. Ativa e define como primeiro plano
+        if maximizar:
+            user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+        else:
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.3)
+    except Exception as e:
+        logger.debug(f"Aviso ao focar janela: {e}")
 
 
 def obter_janela_chrome(timeout_segundos: int = 30):
@@ -201,7 +285,7 @@ def obter_janela_chrome(timeout_segundos: int = 30):
                 txt = win.window_text()
                 cls = win.class_name()
                 if cls == "Chrome_WidgetWin_1" or any(k in txt for k in ["Chrome", "DET", "gov.br"]):
-                    focar_janela_segura(win)
+                    focar_janela_segura(win, maximizar=True)
                     return win
         except Exception:
             pass
@@ -322,9 +406,13 @@ def detectar_presenca_2fa_uia() -> bool:
         for win in desktop.windows():
             titulo = win.window_text().lower()
             if any(k in titulo for k in ["gov.br", "acesse sua conta", "chrome"]):
-                for desc in win.descendants():
+                for desc in win.children():
                     txt = (desc.window_text() or desc.element_info.name or "").lower()
-                    if any(term in txt for term in ["verificação em duas etapas", "duas etapas", "código de acesso", "gerar código de acesso"]):
+                    if any(term in txt for term in [
+                        "verificação em duas etapas", "verificacao em duas etapas",
+                        "duas etapas", "código de acesso", "codigo de acesso",
+                        "gerar código de acesso", "gerar codigo de acesso", "confirme sua identidade"
+                    ]):
                         logger.warning(f"[2FA] Tela de Verificação em duas etapas detectada via UIA: '{txt}'!")
                         return True
     except Exception:
@@ -335,34 +423,76 @@ def detectar_presenca_2fa_uia() -> bool:
 def detectar_verificacao_duas_etapas_playwright(page) -> bool:
     """
     Verifica se a página atual do gov.br está exibindo a tela de 'Verificação em duas etapas' (2FA).
+    Detecta via avaliação direta de texto no DOM (instantâneo), seletores e HTML raw.
     """
     try:
-        url_atual = page.url.lower()
-        if "sso.acesso.gov.br" in url_atual or "login" in url_atual or "duasetapas" in url_atual:
-            termos_2fa = [
-                "text=Verificação em duas etapas",
+        if page.is_closed():
+            return False
+
+        url_atual = ""
+        try:
+            url_atual = page.url.lower()
+        except Exception:
+            pass
+
+        # 1. Avaliação rápida de texto visível no DOM via JavaScript (em milissegundos)
+        try:
+            texto_dom = page.evaluate("() => document.body ? document.body.innerText.toLowerCase() : ''")
+        except Exception:
+            texto_dom = ""
+
+        termos_chave_2fa = [
+            "confirme sua identidade com a verificação em duas etapas",
+            "confirme sua identidade com a verificacao em duas etapas",
+            "verificação em duas etapas",
+            "verificacao em duas etapas",
+            "gerar código de acesso",
+            "gerar codigo de acesso",
+            "não solicitar verificação em duas etapas",
+            "nao solicitar verificacao em duas etapas",
+        ]
+
+        if any(t in texto_dom for t in termos_chave_2fa):
+            logger.warning("[2FA] Tela de Verificação em duas etapas detectada via texto do DOM no Playwright!")
+            return True
+
+        if ("código de acesso" in texto_dom or "codigo de acesso" in texto_dom) and \
+           any(k in url_atual for k in ["sso.acesso.gov.br", "acesso.gov.br", "login", "duasetapas"]):
+            logger.warning("[2FA] Campo de código de acesso em URL gov.br detectado!")
+            return True
+
+        # 2. Seletor Playwright direto se estiver em URL de autenticação
+        eh_url_auth = any(k in url_atual for k in ["sso.acesso.gov.br", "acesso.gov.br", "duasetapas", "login"])
+        if eh_url_auth:
+            seletores_2fa = [
+                "h1:has-text('Confirme sua identidade')",
                 "text=Confirme sua identidade com a Verificação em duas etapas",
-                "text=Gerar código de acesso",
-                "text=Código de acesso",
-                "input[placeholder*='Código de acesso']",
-                "input[placeholder*='codigo de acesso']",
-                "input[aria-label*='Código de acesso']",
+                "text=Verificação em duas etapas",
+                "input[placeholder*='código de acesso' i]",
+                "input[placeholder*='codigo de acesso' i]",
+                "button:has-text('Confirmar')",
             ]
-            for seletor in termos_2fa:
+            for sel in seletores_2fa:
                 try:
-                    if page.locator(seletor).first.is_visible(timeout=500):
+                    if page.locator(sel).first.is_visible(timeout=150):
+                        logger.warning(f"[2FA] Elemento de 2FA detectado via seletor '{sel}' no Playwright!")
                         return True
                 except Exception:
                     pass
 
-            # Verificação complementar pelo conteúdo HTML da página
+        # 3. Fallback de HTML raw
+        try:
             conteudo = page.content().lower()
-            if "verificação em duas etapas" in conteudo or "verificacao em duas etapas" in conteudo:
+            if ("verificação em duas etapas" in conteudo or "verificacao em duas etapas" in conteudo) and \
+               ("código de acesso" in conteudo or "codigo de acesso" in conteudo or "aplicativo gov.br" in conteudo):
+                logger.warning("[2FA] Tela de 2FA detectada via HTML raw no Playwright!")
                 return True
-            if "gerar código de acesso" in conteudo and "aplicativo gov.br" in conteudo:
-                return True
+        except Exception:
+            pass
+
     except Exception as e:
         logger.debug(f"Erro ao verificar tela de 2FA no Playwright: {e}")
+
     return False
 
 
@@ -404,13 +534,38 @@ def clicar_botao_govbr_garantido(timeout_segundos: int = 25) -> bool:
     return False
 
 
+def rolar_pagina_para_baixo_total():
+    """
+    Posiciona o mouse no centro da tela e rola a página completamente para baixo,
+    garantindo que opções no rodapé (como 'Seu certificado digital') fiquem visíveis.
+    """
+    try:
+        largura, altura = pyautogui.size()
+        pyautogui.moveTo(largura // 2, altura // 2, duration=0.2)
+        time.sleep(0.2)
+        logger.info("[FASE 1 - SO] Realizando scroll para descer a página completamente...")
+        for _ in range(5):
+            pyautogui.scroll(-1000)
+            time.sleep(0.1)
+        time.sleep(0.5)
+    except Exception as e:
+        logger.warning(f"[FASE 1 - SO] Erro ao rolar a página para baixo: {e}")
+
+
 def clicar_botao_certificado_garantido(timeout_segundos: int = 30) -> bool:
     """
     Aguarda e clica em 'Seu certificado digital' na tela do sso.acesso.gov.br.
-    Se demorar, realiza uma leve rolagem na página para garantir visibilidade.
+    Necessariamente desce a tela toda antes de localizar e clicar na imagem do print.
     Se detectar captcha, levanta CaptchaDetectadoException imediatamente.
     """
-    logger.info(f"[FASE 1 - SO] Procurando 'Seu certificado digital' na tela (timeout={timeout_segundos}s)...")
+    logger.info(f"[FASE 1 - SO] Preparando tela para 'Seu certificado digital' (timeout={timeout_segundos}s)...")
+
+    # Aguarda renderização inicial da página do gov.br
+    time.sleep(1.5)
+
+    # Scroll obrigatório para descer a tela completamente ANTES de procurar o botão
+    rolar_pagina_para_baixo_total()
+
     fim = time.time() + timeout_segundos
     tentativa = 0
 
@@ -427,14 +582,10 @@ def clicar_botao_certificado_garantido(timeout_segundos: int = 30) -> bool:
                 raise CaptchaDetectadoException("hCaptcha detectado logo após clicar em 'Seu certificado digital'.")
             return True
 
-        if tentativa % 6 == 0:
-            logger.info(f"[FASE 1 - SO] Tentando leve rolagem da página para baixo (tentativa {tentativa})...")
-            try:
-                largura, altura = pyautogui.size()
-                pyautogui.moveTo(largura // 2, altura // 2)
-                pyautogui.scroll(-200)
-            except Exception:
-                pass
+        # Troca a verificação anterior: reforça o scroll para descer tudo caso a página ainda não tenha atingido o rodapé
+        if tentativa % 5 == 0:
+            logger.info(f"[FASE 1 - SO] Reforçando descida total da página (tentativa {tentativa})...")
+            rolar_pagina_para_baixo_total()
 
         time.sleep(0.8)
 
@@ -627,14 +778,6 @@ def selecionar_e_confirmar_certificado(termo_busca: str = "", timeout_segundos: 
                         time.sleep(1.5)
                         return False
 
-                # Captura screenshot de depuração para confirmação visual da seleção (fundo azul)
-                try:
-                    caminho_debug = BASE_DIR / "debug_certificado_selecionado.png"
-                    pyautogui.screenshot(str(caminho_debug))
-                    logger.info(f"[DIAGNÓSTICO] Screenshot da seleção salvo em: {caminho_debug.name}")
-                except Exception:
-                    pass
-
                 # Confirma clicando no botão OK via UIA ou Imagem
                 btns_ok = janela_cert.descendants(control_type="Button", title="OK")
                 if btns_ok:
@@ -679,39 +822,26 @@ def fechar_navegador(browser=None, context=None, page=None):
     """
     global CHROME_PROC
 
-    # 1. Encerramento via Playwright / CDP se ativos
+    # 1. Encerramento gracioso via Playwright / CDP se ativos
     try:
         if context and page and not page.is_closed():
             cdp = context.new_cdp_session(page)
             cdp.send("Browser.close")
-            time.sleep(0.8)
+            time.sleep(0.5)
     except Exception:
         pass
 
     try:
         if browser:
             browser.close()
-            time.sleep(0.4)
+            time.sleep(0.3)
     except Exception:
         pass
 
-    # 2. Encerramento via CDP direto se porta ainda ocupada
-    if porta_em_uso(CDP_PORT):
-        liberar_porta_se_ocupada()
+    # 2. Encerramento forçado e definitivo de todos os processos da automação (árvore completa)
+    matar_processos_chrome_automacao()
 
-    # 3. Encerramento via processo Popen
-    if CHROME_PROC is not None:
-        try:
-            CHROME_PROC.terminate()
-            CHROME_PROC.wait(timeout=2)
-        except Exception:
-            try:
-                CHROME_PROC.kill()
-            except Exception:
-                pass
-        CHROME_PROC = None
-
-    # 4. Encerramento via fechamento de janela UIA se ainda existir
+    # 3. Encerramento via fechamento de janela UIA se ainda existir resíduo
     try:
         desktop = Desktop(backend="uia")
         for win in desktop.windows():
@@ -1561,6 +1691,12 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
     fill_falha = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
     for it in itens:
+        status_final_texto = it.status_final
+        if it.status_final == "EXIGE_2FA":
+            status_final_texto = "Necessita confirmação de identidade"
+        elif it.status_final == "SUCESSO":
+            status_final_texto = "SUCESSO"
+
         ws.append([
             it.cnpj,
             it.certificado,
@@ -1568,7 +1704,7 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
             it.detalhe_t1,
             it.status_t2,
             it.detalhe_t2,
-            it.status_final,
+            status_final_texto,
             it.data_hora or datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
         ])
         row_idx = ws.max_row
@@ -1587,8 +1723,11 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
 
     wb.save(str(caminho_relatorio))
     wb.close()
-    logger.info(f"[RELATÓRIO] Planilha de relatório gerada com sucesso em: {caminho_relatorio.name}")
+    logger.info(f"[RELATÓRIO] Planilha de relatório geral gerada com sucesso em: {caminho_relatorio.name}")
     return caminho_relatorio
+
+
+
 
 
 def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Optional[Path]:
@@ -1602,19 +1741,44 @@ def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Opti
     if pendentes:
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.title = "Documentos"
+        ws.title = "CNPJs_consultados"
         ws["A1"] = "CNPJ"
         ws["B1"] = "Certificado"
 
-        header_font = Font(bold=True)
-        ws["A1"].font = header_font
-        ws["B1"].font = header_font
+        cor_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        fonte_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        alinhamento_centro = Alignment(horizontal="center", vertical="center")
+        borda_fina = Border(
+            left=Side(style="thin", color="D9D9D9"),
+            right=Side(style="thin", color="D9D9D9"),
+            top=Side(style="thin", color="D9D9D9"),
+            bottom=Side(style="thin", color="D9D9D9"),
+        )
+
+        ws.row_dimensions[1].height = 24
+        for col_idx in [1, 2]:
+            c = ws.cell(row=1, column=col_idx)
+            c.fill = cor_header
+            c.font = fonte_header
+            c.alignment = alinhamento_centro
 
         for p in pendentes:
             ws.append([p.cnpj, p.certificado])
 
+        for row_idx in range(2, ws.max_row + 1):
+            ws.row_dimensions[row_idx].height = 20
+            c_cnpj = ws.cell(row=row_idx, column=1)
+            c_cert = ws.cell(row=row_idx, column=2)
+            c_cnpj.font = Font(name="Calibri", size=11)
+            c_cnpj.alignment = alinhamento_centro
+            c_cnpj.border = borda_fina
+            c_cnpj.number_format = "@"
+            c_cert.font = Font(name="Calibri", size=11)
+            c_cert.alignment = Alignment(horizontal="left", vertical="center")
+            c_cert.border = borda_fina
+
         ws.column_dimensions["A"].width = 25
-        ws.column_dimensions["B"].width = 30
+        ws.column_dimensions["B"].width = 65
 
         wb.save(str(caminho_pendentes))
         wb.close()
@@ -1639,13 +1803,16 @@ def registrar_pulo_2fa(
     total_grupos: int,
     total_itens: int,
     item_global_counter: list[int],
-    screenshots_dir: Path,
+    pasta_cert: Path,
+    base_dir: Path,
+    execucao_dt_str: str,
     pagina_2fa=None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ):
     """
-    Registra o pulo imediato de um certificado que exibiu a tela de Verificação em duas etapas (2FA),
-    atualiza o histórico de todos os CNPJs do grupo para o relatório e tira screenshot comprobatório.
+    Registra o pulo imediato de um certificado que exibiu a tela de Verificação em duas etapas (2FA).
+    Salva screenshot comprobatório na pasta do certificado, preenche os itens como
+    'Necessita confirmação de identidade' e grava imediatamente nos relatórios e pendentes.
     """
     logger.warning("\n" + "=" * 80)
     logger.warning(
@@ -1654,36 +1821,59 @@ def registrar_pulo_2fa(
     )
     logger.warning("=" * 80 + "\n")
 
-    nome_seguro = re.sub(r"[^a-zA-Z0-9_-]", "_", nome_cert_exibicao)[:25]
-    caminho_print_2fa = screenshots_dir / f"2FA_{nome_seguro}_{datetime.now().strftime('%H%M%S')}.png"
+    pasta_cert.mkdir(parents=True, exist_ok=True)
+    caminho_print_2fa = pasta_cert / "01_necessita_confirmacao_identidade_2fa.png"
     try:
+        salvo = False
         if pagina_2fa and not pagina_2fa.is_closed():
-            pagina_2fa.screenshot(path=str(caminho_print_2fa))
-        else:
-            pyautogui.screenshot(str(caminho_print_2fa))
-        logger.info(f"[COMPROVANTE] Screenshot da tela de 2FA salvo em: {caminho_print_2fa.name}")
+            try:
+                pagina_2fa.bring_to_front()
+                pagina_2fa.screenshot(path=str(caminho_print_2fa))
+                salvo = True
+            except Exception:
+                pass
+        if not salvo:
+            try:
+                pyautogui.screenshot(str(caminho_print_2fa))
+                salvo = True
+            except Exception:
+                pass
+        if not salvo:
+            img = Image.new("RGB", (1280, 720), color=(255, 242, 204))
+            img.save(str(caminho_print_2fa))
+            salvo = True
+        logger.info(f"[COMPROVANTE] Screenshot da tela de 2FA salvo na pasta do certificado: {caminho_print_2fa.name}")
     except Exception as e_shot:
-        logger.debug(f"Não foi possível salvar screenshot de 2FA: {e_shot}")
+        logger.warning(f"Não foi possível salvar screenshot de 2FA: {e_shot}")
 
     for doc in lista_cnpjs:
         it = mapa_itens[doc]
         status_code = "EXIGE_2FA"
-        msg = "Certificado exige Verificação em duas etapas (2FA) no Gov.br"
+        status_exibicao = "Necessita confirmação de identidade"
+        msg = "Necessita confirmação de identidade (2FA Gov.br)"
         if rodada == 1:
-            it.status_t1 = status_code
+            it.status_t1 = status_exibicao
             it.detalhe_t1 = msg
         else:
-            it.status_t2 = status_code
+            it.status_t2 = status_exibicao
             it.detalhe_t2 = msg
         it.status_final = status_code
         it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
     item_global_counter[0] += len(lista_cnpjs)
+
+    # Grava imediatamente no Relatório de Execução e na Planilha de Pendentes
+    try:
+        salvar_relatorio_execucao(base_dir, execucao_dt_str, list(mapa_itens.values()))
+        salvar_planilha_pendentes(base_dir, list(mapa_itens.values()))
+    except Exception as e_rel:
+        logger.debug(f"Aviso ao salvar relatórios após 2FA: {e_rel}")
+
     if progress_callback:
         progress_callback(
             item_global_counter[0],
             total_itens,
-            f"Grupo {num_grupo}/{total_grupos} pulado: Exige 2FA no Gov.br ({nome_cert_exibicao[:20]})",
+            f"Grupo {num_grupo}/{total_grupos} pulado: 2FA ({nome_cert_exibicao[:20]})",
         )
 
 
@@ -1701,6 +1891,8 @@ def processar_sessao_certificado(
     item_global_counter: list[int],
     screenshots_dir: Path,
     hoje_date,
+    base_dir: Path,
+    execucao_dt_str: str,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> bool:
@@ -1713,6 +1905,8 @@ def processar_sessao_certificado(
     - Logout e fechamento limpo do navegador.
     """
     nome_cert_exibicao = cert_alvo if cert_alvo else "Padrão"
+    pasta_cert = screenshots_dir / sanitizar_nome_pasta(cert_alvo)
+    pasta_cert.mkdir(parents=True, exist_ok=True)
     logger.info(
         f"\n{'='*60}\n>>> INICIANDO GRUPO {num_grupo}/{total_grupos} (Rodada {rodada}): "
         f"Certificado '{nome_cert_exibicao}' ({len(lista_cnpjs)} CNPJs)\n{'='*60}"
@@ -1752,7 +1946,7 @@ def processar_sessao_certificado(
 
                 try:
                     chrome_win = obter_janela_chrome(timeout_segundos=30)
-                    focar_janela_segura(chrome_win)
+                    focar_janela_segura(chrome_win, maximizar=True)
                     time.sleep(2)
 
                     if stop_event and stop_event.is_set():
@@ -1821,7 +2015,10 @@ def processar_sessao_certificado(
                         total_grupos=total_grupos,
                         total_itens=total_itens,
                         item_global_counter=item_global_counter,
-                        screenshots_dir=screenshots_dir,
+                        pasta_cert=pasta_cert,
+                        base_dir=base_dir,
+                        execucao_dt_str=execucao_dt_str,
+                        pagina_2fa=page,
                         progress_callback=progress_callback,
                     )
                     fechar_navegador(browser, context, page)
@@ -1988,7 +2185,9 @@ def processar_sessao_certificado(
                 total_grupos=total_grupos,
                 total_itens=total_itens,
                 item_global_counter=item_global_counter,
-                screenshots_dir=screenshots_dir,
+                pasta_cert=pasta_cert,
+                base_dir=base_dir,
+                execucao_dt_str=execucao_dt_str,
                 pagina_2fa=pagina_2fa,
                 progress_callback=progress_callback,
             )
@@ -2072,7 +2271,7 @@ def processar_sessao_certificado(
                 item_id=item_id,
                 idx_item=idx_atual,
                 total_itens=total_itens,
-                screenshots_dir=screenshots_dir,
+                screenshots_dir=pasta_cert,
                 hoje_date=hoje_date,
                 perfil_ref=perfil_ref,
                 progress_callback=progress_callback,
@@ -2088,6 +2287,12 @@ def processar_sessao_certificado(
                 it.detalhe_t2 = detalhe
             it.status_final = status_code
             it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+            # Atualiza o relatório geral consolidado com os resultados mais recentes
+            try:
+                salvar_relatorio_execucao(base_dir, execucao_dt_str, list(mapa_itens.values()))
+            except Exception:
+                pass
 
             if sucesso:
                 falhas_seguidas = 0
@@ -2144,7 +2349,7 @@ def executar_robo_hibrido(
 
     hoje_date = datetime.now().date()
     execucao_dt_str = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
-    screenshots_raiz = base_dir / "CapturasDeTela"
+    screenshots_raiz = base_dir / "CapturasDeTela-Downloads"
     screenshots_dir = screenshots_raiz / execucao_dt_str
     pasta_logs = base_dir / "Logs"
     pasta_relatorios = base_dir / "Relatorios"
@@ -2159,6 +2364,9 @@ def executar_robo_hibrido(
     executar_rotatividade_antigos(screenshots_raiz, eh_pasta=True, min_itens=10, limite_dias=60)
     executar_rotatividade_antigos(pasta_relatorios, eh_pasta=False, min_itens=10, limite_dias=60)
 
+    # Garante que qualquer resíduo anterior do Chrome seja encerrado antes do início
+    liberar_porta_se_ocupada()
+
     # 1. Verificação da Planilha de Entrada (se não existir, é criada automaticamente se for a padrão)
     if not excel_path.exists():
         if planilha_especifica:
@@ -2169,14 +2377,21 @@ def executar_robo_hibrido(
             base_dir.mkdir(parents=True, exist_ok=True)
             wb = openpyxl.Workbook()
             ws = wb.active
-            ws.title = "Documentos"
+            ws.title = "CNPJs_consultados"
             ws["A1"] = "CNPJ"
             ws["B1"] = "Certificado"
-            header_font = Font(bold=True)
-            ws["A1"].font = header_font
-            ws["B1"].font = header_font
+            cor_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+            fonte_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+            alinhamento_centro = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[1].height = 24
+            ws["A1"].fill = cor_header
+            ws["A1"].font = fonte_header
+            ws["A1"].alignment = alinhamento_centro
+            ws["B1"].fill = cor_header
+            ws["B1"].font = fonte_header
+            ws["B1"].alignment = alinhamento_centro
             ws.column_dimensions["A"].width = 25
-            ws.column_dimensions["B"].width = 30
+            ws.column_dimensions["B"].width = 65
             wb.save(str(excel_path))
             wb.close()
             logger.info(f"Planilha modelo criada automaticamente com sucesso em: {excel_path}")
@@ -2188,7 +2403,12 @@ def executar_robo_hibrido(
     # Leitura das linhas da planilha: Coluna A = CNPJ, Coluna B = Certificado
     try:
         wb = openpyxl.load_workbook(str(excel_path), data_only=True)
-        sheet = wb.active
+        if "CNPJs_consultados" in wb.sheetnames:
+            sheet = wb["CNPJs_consultados"]
+        elif "Documentos" in wb.sheetnames:
+            sheet = wb["Documentos"]
+        else:
+            sheet = wb.active
         linhas_lidas = []
         for row in sheet.iter_rows(min_row=1, values_only=True):
             if not row:
@@ -2203,7 +2423,10 @@ def executar_robo_hibrido(
         return False
 
     # Filtra cabeçalhos conhecidos
-    header_names = {"CNPJ_OU_CPF", "CNPJ_E_CPF", "CNPJS_E_CPFS", "CNPJ", "CPF", "DOCUMENTO", "DOCUMENTOS"}
+    header_names = {
+        "CNPJ_OU_CPF", "CNPJ_E_CPF", "CNPJS_E_CPFS", "CNPJ", "CPF",
+        "DOCUMENTO", "DOCUMENTOS", "CNPJS_CONSULTADOS"
+    }
     dados_filtrados = [
         (doc, cert) for doc, cert in linhas_lidas
         if doc.upper() not in header_names
@@ -2262,6 +2485,8 @@ def executar_robo_hibrido(
                 item_global_counter=item_counter,
                 screenshots_dir=screenshots_dir,
                 hoje_date=hoje_date,
+                base_dir=base_dir,
+                execucao_dt_str=execucao_dt_str,
                 progress_callback=progress_callback,
                 stop_event=stop_event,
             )
@@ -2298,11 +2523,15 @@ def executar_robo_hibrido(
                     item_global_counter=item_counter_r2,
                     screenshots_dir=screenshots_dir,
                     hoje_date=hoje_date,
+                    base_dir=base_dir,
+                    execucao_dt_str=execucao_dt_str,
                     progress_callback=progress_callback,
                     stop_event=stop_event,
                 )
 
     finally:
+        # Garante o fechamento definitivo de qualquer processo restante do Chrome
+        matar_processos_chrome_automacao()
         # Gera o Relatório de Execução consolidado com histórico e a Planilha de Pendentes sempre!
         salvar_relatorio_execucao(base_dir, execucao_dt_str, list(mapa_itens.values()))
         salvar_planilha_pendentes(base_dir, list(mapa_itens.values()))
