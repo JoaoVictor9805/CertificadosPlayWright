@@ -37,7 +37,7 @@ URL_SERVICOS = "https://det.sit.trabalho.gov.br/servicos"
 
 # ModoTeste = True: considera notificações com data <= hoje (testes).
 # Em produção, trocar para False (data >= hoje).
-MODO_TESTE = False
+MODO_TESTE = True
 
 # Diretório base padrão para depuração e caminhos de fallback
 BASE_DIR = Path.cwd()
@@ -239,44 +239,58 @@ def iniciar_chrome_hibrido():
         time.sleep(0.5)
 
 
-def focar_janela_segura(win, maximizar: bool = False):
+def focar_janela_segura(win, *args, **kwargs):
     """
-    Garante foco e primeiro plano absoluto na janela alvo,
-    contornando restrições de roubo de foco do Agendador de Tarefas do Windows
-    usando HWND_TOPMOST temporário e simulação de tecla de sistema (ALT).
+    Garante foco e primeiro plano na janela alvo de forma limpa e confiável,
+    superando as restrições de Foreground Lock / Focus-Stealing do Windows
+    (mesmo em execuções de 2ª rodada ou via Agendador de Tarefas), utilizando
+    SwitchToThisWindow e permissões de thread cruzadas.
     """
     try:
         hwnd = win.handle if hasattr(win, "handle") else int(win)
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
 
-        # 1. Se estiver minimizada, restaura para exibição normal
+        # 1. Se estiver minimizada, restaura
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, 9)  # SW_RESTORE
 
-        # 2. Simulação da tecla ALT para contornar o bloqueio de ForegroundLock do Windows
-        user32.keybd_event(0x12, 0, 0, 0)  # ALT pressionado
-        user32.keybd_event(0x12, 0, 2, 0)  # ALT liberado
+        # 2. Conecta as threads do Windows (primeiro plano, janela alvo e processo da automação)
+        h_fore = user32.GetForegroundWindow()
+        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+        fore_thread = user32.GetWindowThreadProcessId(h_fore, None) if h_fore else 0
+        app_thread = kernel32.GetCurrentThreadId()
 
-        # 3. Força a janela para o topo absoluto (TOPMOST) e remove o pino em seguida
-        HWND_TOPMOST = -1
-        HWND_NOTOPMOST = -2
-        SWP_FLAGS = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
-        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_FLAGS)
-        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_FLAGS)
+        attached_fore = False
+        attached_app = False
 
-        # 4. Ativa e define como primeiro plano
-        if maximizar:
-            user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
-        else:
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        user32.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
-    except Exception as e:
-        logger.debug(f"Aviso ao focar janela: {e}")
+        if fore_thread and target_thread and fore_thread != target_thread:
+            attached_fore = bool(user32.AttachThreadInput(fore_thread, target_thread, True))
+        if app_thread and target_thread and app_thread != target_thread:
+            attached_app = bool(user32.AttachThreadInput(app_thread, target_thread, True))
+
+        try:
+            # Pulso rápido de ALT para resetar o bloqueio de roubo de foco (ForegroundLockTimeout)
+            user32.keybd_event(0x12, 0, 0, 0)
+            user32.keybd_event(0x12, 0, 2, 0)
+
+            # SwitchToThisWindow com fAltTab=True simula o Alt-Tab nativo diretamente para a janela alvo
+            user32.SwitchToThisWindow(hwnd, True)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+        finally:
+            if attached_fore:
+                user32.AttachThreadInput(fore_thread, target_thread, False)
+            if attached_app:
+                user32.AttachThreadInput(app_thread, target_thread, False)
+
+        time.sleep(0.5)
+    except Exception:
+        pass
 
 
 def obter_janela_chrome(timeout_segundos: int = 30):
-    """Localiza a janela principal do Chrome aberta."""
+    """Localiza exclusivamente a janela principal do Google Chrome aberta."""
     desktop = Desktop(backend="uia")
     fim = time.time() + timeout_segundos
     while time.time() < fim:
@@ -284,12 +298,20 @@ def obter_janela_chrome(timeout_segundos: int = 30):
             for win in desktop.windows():
                 txt = win.window_text()
                 cls = win.class_name()
-                if cls == "Chrome_WidgetWin_1" or any(k in txt for k in ["Chrome", "DET", "gov.br"]):
-                    focar_janela_segura(win, maximizar=True)
+                txt_lower = txt.lower()
+                # Ignora expressamente Antigravity, VS Code, Edge e Agendador de Tarefas
+                if any(ignorar in txt_lower for ignorar in [
+                    "antigravity", "visual studio code", "vscode", "microsoft edge", "msedge",
+                    "agendador de tarefas", "task scheduler"
+                ]):
+                    continue
+                # Identifica exclusivamente a janela do Google Chrome oficial
+                if cls == "Chrome_WidgetWin_1" and ("google chrome" in txt_lower or txt_lower.endswith("chrome")):
+                    focar_janela_segura(win)
                     return win
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(0.8)
     raise TimeoutError("Janela do Google Chrome não encontrada dentro do tempo limite.")
 
 
@@ -385,6 +407,11 @@ def detectar_presenca_captcha() -> bool:
         desktop = Desktop(backend="uia")
         for win in desktop.windows():
             titulo = win.window_text().lower()
+            if any(ignorar in titulo for ignorar in [
+                "antigravity", "visual studio code", "vscode", "microsoft edge", "msedge",
+                "agendador de tarefas", "task scheduler"
+            ]):
+                continue
             if any(k in titulo for k in ["gov.br", "acesse sua conta"]):
                 for desc in win.descendants():
                     txt = (desc.window_text() or desc.element_info.name or "").lower()
@@ -405,6 +432,11 @@ def detectar_presenca_2fa_uia() -> bool:
         desktop = Desktop(backend="uia")
         for win in desktop.windows():
             titulo = win.window_text().lower()
+            if any(ignorar in titulo for ignorar in [
+                "antigravity", "visual studio code", "vscode", "microsoft edge", "msedge",
+                "agendador de tarefas", "task scheduler"
+            ]):
+                continue
             if any(k in titulo for k in ["gov.br", "acesse sua conta", "chrome"]):
                 for desc in win.children():
                     txt = (desc.window_text() or desc.element_info.name or "").lower()
@@ -630,6 +662,11 @@ def confirmar_popup_certificado(timeout_segundos: int = 25) -> bool:
             desktop = Desktop(backend="uia")
             for win in desktop.windows():
                 titulo = win.window_text().lower()
+                if any(ignorar in titulo for ignorar in [
+                    "antigravity", "visual studio code", "vscode", "microsoft edge", "msedge",
+                    "agendador de tarefas", "task scheduler"
+                ]):
+                    continue
                 palavras_chave = [
                     "gov.br", "acesse sua conta", "selecionar um certificado",
                     "certificado", "segurança do windows", "windows security", "segurança"
@@ -656,6 +693,11 @@ def confirmar_popup_certificado(timeout_segundos: int = 25) -> bool:
                 desktop = Desktop(backend="uia")
                 for win in desktop.windows():
                     titulo = win.window_text().lower()
+                    if any(ignorar in titulo for ignorar in [
+                        "antigravity", "visual studio code", "vscode", "microsoft edge", "msedge",
+                        "agendador de tarefas", "task scheduler"
+                    ]):
+                        continue
                     if any(k in titulo for k in ["certificado", "segurança", "gov.br"]):
                         focar_janela_segura(win)
                         break
@@ -706,6 +748,11 @@ def selecionar_e_confirmar_certificado(termo_busca: str = "", timeout_segundos: 
             janela_cert = None
             for win in desktop.windows():
                 titulo = win.window_text().lower()
+                if any(ignorar in titulo for ignorar in [
+                    "antigravity", "visual studio code", "vscode", "microsoft edge", "msedge",
+                    "agendador de tarefas", "task scheduler"
+                ]):
+                    continue
                 palavras_chave = [
                     "gov.br", "acesse sua conta", "selecionar um certificado",
                     "selecione um certificado", "certificado", "segurança do windows", "windows security", "segurança"
@@ -847,7 +894,13 @@ def fechar_navegador(browser=None, context=None, page=None):
         for win in desktop.windows():
             cls = win.class_name()
             txt = win.window_text()
-            if cls == "Chrome_WidgetWin_1" and any(k in txt for k in ["Chrome", "DET", "gov.br"]):
+            txt_lower = txt.lower()
+            if any(ignorar in txt_lower for ignorar in [
+                "antigravity", "visual studio code", "vscode", "microsoft edge", "msedge",
+                "agendador de tarefas", "task scheduler"
+            ]):
+                continue
+            if cls == "Chrome_WidgetWin_1" and ("google chrome" in txt_lower or txt_lower.endswith("chrome")):
                 win.close()
     except Exception:
         pass
@@ -1946,7 +1999,7 @@ def processar_sessao_certificado(
 
                 try:
                     chrome_win = obter_janela_chrome(timeout_segundos=30)
-                    focar_janela_segura(chrome_win, maximizar=True)
+                    focar_janela_segura(chrome_win)
                     time.sleep(2)
 
                     if stop_event and stop_event.is_set():
