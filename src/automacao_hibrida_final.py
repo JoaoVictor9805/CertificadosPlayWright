@@ -37,7 +37,7 @@ URL_SERVICOS = "https://det.sit.trabalho.gov.br/servicos"
 
 # ModoTeste = True: considera notificações com data <= hoje (testes).
 # Em produção, trocar para False (data >= hoje).
-MODO_TESTE = True
+MODO_TESTE = False
 
 # Diretório base padrão para depuração e caminhos de fallback
 BASE_DIR = Path.cwd()
