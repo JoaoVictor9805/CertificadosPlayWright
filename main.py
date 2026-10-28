@@ -180,6 +180,17 @@ def obter_argumentos() -> Tuple[Path, str, Optional[str], bool]:
 
 
 def main():
+    # Oculta a pasta interna de bibliotecas (_internal) para manter a raiz limpa e elegante para o usuário
+    try:
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            internal_dir = exe_dir / "_internal"
+            if internal_dir.exists():
+                import subprocess
+                subprocess.run(["attrib", "+h", str(internal_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
     pasta_base, operacao, planilha_especifica, eh_interativo = obter_argumentos()
 
     # Ramo 1: Apenas Atualização de Certificados Digitais no Excel
