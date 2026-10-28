@@ -37,7 +37,7 @@ URL_SERVICOS = "https://det.sit.trabalho.gov.br/servicos"
 
 # ModoTeste = True: considera notificações com data <= hoje (testes).
 # Em produção, trocar para False (data >= hoje).
-MODO_TESTE = False
+MODO_TESTE = True
 
 # Diretório base padrão para depuração e caminhos de fallback
 BASE_DIR = Path.cwd()
@@ -1370,7 +1370,109 @@ def processar_item_det(
                     existe_notificacao_valida = True
                 dados_linhas.append((idx, texto_data, valida))
 
-            if not existe_notificacao_valida:
+            # --- CAPTURA DE PRINTS DE TELA DE NOTIFICAÇÕES (PARTE 1: TOPO | PARTE 2: TABELA/RODAPÉ) ---
+            etapa = "Tirando prints da tela de Notificações"
+            linhas_ja_capturadas = set()
+
+            # 1. Primeiro print: Tela inicial no topo (mostrando dados do Empregador, Usuário e filtros)
+            try:
+                page.evaluate("window.scrollTo(0, 0)")
+            except Exception:
+                pass
+            time.sleep(DELAY_ENTRE_ACOES_S)
+
+            try:
+                page.mouse.move(0, 0)
+                time.sleep(0.3)
+                page.evaluate("""() => {
+                    const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                    tooltips.forEach(t => t.remove());
+                }""")
+            except Exception:
+                pass
+
+            caminho_print_1 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte1.jpg"
+            page.screenshot(path=str(caminho_print_1), type="jpeg")
+            log_etapa(
+                item_id,
+                etapa,
+                f"Print #1 da tela inteira (topo com identificação do Empregador) realizado com sucesso ({caminho_print_1.name}).",
+            )
+            time.sleep(DELAY_ENTRE_ACOES_S)
+
+            # 2. Segundo print: Rola até a tabela de notificações para posicioná-la no topo/centro
+            try:
+                topo_notif = page.locator("h1:has-text('Notificações'), h2:has-text('Notificações'), h3:has-text('Notificações'), ngx-datatable").first
+                if topo_notif.count() > 0 and topo_notif.is_visible():
+                    topo_notif.evaluate("el => el.scrollIntoView({ block: 'start' })")
+                elif linhas_notif.count() > 0:
+                    linhas_notif.first.evaluate("el => el.scrollIntoView({ block: 'start' })")
+                else:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            except Exception:
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
+
+            time.sleep(DELAY_ENTRE_ACOES_S)
+
+            try:
+                page.mouse.move(0, 0)
+                time.sleep(0.3)
+                page.evaluate("""() => {
+                    const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                    tooltips.forEach(t => t.remove());
+                }""")
+            except Exception:
+                pass
+
+            # Identifica quais linhas ficaram visíveis neste segundo print a partir do topo das notificações
+            try:
+                linhas_visiveis = page.evaluate("""() => {
+                    const rows = Array.from(document.querySelectorAll('ngx-datatable datatable-row-wrapper'));
+                    const vh = window.innerHeight;
+                    const vis = [];
+                    rows.forEach((r, i) => {
+                        const rect = r.getBoundingClientRect();
+                        const hVis = Math.min(rect.bottom, vh) - Math.max(rect.top, 0);
+                        if (hVis > 50 && rect.top < vh && rect.bottom > 0) {
+                            vis.push(i);
+                        }
+                    });
+                    return vis;
+                }""")
+                linhas_ja_capturadas.update(linhas_visiveis)
+            except Exception:
+                linhas_ja_capturadas.add(0)
+
+            # Tira o print com a tabela rolada para o topo
+            caminho_print_2 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte2.jpg"
+            page.screenshot(path=str(caminho_print_2), type="jpeg")
+            log_etapa(
+                item_id,
+                etapa,
+                f"Print #2 da tela inteira (rolado até as notificações/tabela) realizado com sucesso ({caminho_print_2.name}), cobrindo linha(s): {sorted(list(linhas_ja_capturadas))}.",
+            )
+            time.sleep(DELAY_ENTRE_ACOES_S)
+
+            # 3. Se houver notificações mais abaixo que ainda não apareceram no print rolado, vai descendo
+            num_print = 3
+            indices_para_percorrer = [idx for idx, _, val in dados_linhas if val]
+            if not indices_para_percorrer:
+                indices_para_percorrer = [idx for idx, _, _ in dados_linhas]
+
+            for idx in indices_para_percorrer:
+                if idx in linhas_ja_capturadas:
+                    continue
+
+                row_loc = linhas_notif.nth(idx)
+                try:
+                    row_loc.evaluate("el => el.scrollIntoView({ block: 'start' })")
+                except Exception:
+                    row_loc.scroll_into_view_if_needed()
+                time.sleep(DELAY_ENTRE_ACOES_S)
+
                 try:
                     page.mouse.move(0, 0)
                     time.sleep(0.3)
@@ -1381,73 +1483,6 @@ def processar_item_det(
                 except Exception:
                     pass
 
-                caminho_print_notif = pasta_notificacao / f"{item_id}_{formatted_dt}.jpg"
-                page.screenshot(path=str(caminho_print_notif), type="jpeg")
-                log_etapa(
-                    item_id,
-                    etapa,
-                    f"Print da tela de Notificação (nenhuma válida por data) realizado com sucesso: {caminho_print_notif.name}",
-                )
-                time.sleep(DELAY_ENTRE_ACOES_S)
-            else:
-                # --- CAPTURA DE PRINTS DE TELA INTEIRA (SEM DUPLICAÇÃO) ---
-                etapa = "Tirando prints da tela de Notificações"
-                indices_validos = [idx for idx, _, val in dados_linhas if val]
-                linhas_ja_capturadas = set()
-
-                # 1. Primeiro print: Tela inicial no topo (mostrando dados do Empregador, Usuário e filtros)
-                try:
-                    page.evaluate("window.scrollTo(0, 0)")
-                except Exception:
-                    pass
-                time.sleep(DELAY_ENTRE_ACOES_S)
-
-                # Remove tooltips / popovers antes do print
-                try:
-                    page.mouse.move(0, 0)
-                    time.sleep(0.3)
-                    page.evaluate("""() => {
-                        const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
-                        tooltips.forEach(t => t.remove());
-                    }""")
-                except Exception:
-                    pass
-
-                caminho_print_1 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte1.jpg"
-                page.screenshot(path=str(caminho_print_1), type="jpeg")
-                log_etapa(
-                    item_id,
-                    etapa,
-                    f"Print #1 da tela inteira (topo com identificação do Empregador) realizado com sucesso ({caminho_print_1.name}).",
-                )
-                time.sleep(DELAY_ENTRE_ACOES_S)
-
-                # 2. Segundo print: Rola até a primeira notificação (ou cabeçalho) para posicioná-la no topo
-                try:
-                    topo_notif = page.locator("h1:has-text('Notificações'), h2:has-text('Notificações'), h3:has-text('Notificações'), ngx-datatable").first
-                    if topo_notif.count() > 0 and topo_notif.is_visible():
-                        topo_notif.evaluate("el => el.scrollIntoView({ block: 'start' })")
-                    elif linhas_notif.count() > 0:
-                        linhas_notif.first.evaluate("el => el.scrollIntoView({ block: 'start' })")
-                except Exception:
-                    try:
-                        linhas_notif.first.scroll_into_view_if_needed()
-                    except Exception:
-                        pass
-
-                time.sleep(DELAY_ENTRE_ACOES_S)
-
-                try:
-                    page.mouse.move(0, 0)
-                    time.sleep(0.3)
-                    page.evaluate("""() => {
-                        const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
-                        tooltips.forEach(t => t.remove());
-                    }""")
-                except Exception:
-                    pass
-
-                # Identifica quais linhas ficaram visíveis neste segundo print a partir do topo das notificações
                 try:
                     linhas_visiveis = page.evaluate("""() => {
                         const rows = Array.from(document.querySelectorAll('ngx-datatable datatable-row-wrapper'));
@@ -1464,68 +1499,17 @@ def processar_item_det(
                     }""")
                     linhas_ja_capturadas.update(linhas_visiveis)
                 except Exception:
-                    linhas_ja_capturadas.add(0)
+                    linhas_ja_capturadas.add(idx)
 
-                # Tira o print com a tabela rolada para o topo
-                caminho_print_2 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte2.jpg"
-                page.screenshot(path=str(caminho_print_2), type="jpeg")
+                caminho_print_n = pasta_notificacao / f"{item_id}_{formatted_dt}_parte{num_print}.jpg"
+                page.screenshot(path=str(caminho_print_n), type="jpeg")
                 log_etapa(
                     item_id,
                     etapa,
-                    f"Print #2 da tela inteira (rolado até as notificações) realizado com sucesso ({caminho_print_2.name}), cobrindo linha(s): {sorted(list(linhas_ja_capturadas))}.",
+                    f"Print #{num_print} da tela inteira realizado descendo até a linha {idx} ({caminho_print_n.name}), cobrindo linha(s): {sorted(list(linhas_ja_capturadas))}.",
                 )
+                num_print += 1
                 time.sleep(DELAY_ENTRE_ACOES_S)
-
-                # 3. Se houver notificações válidas mais abaixo que ainda não apareceram no print rolado, vai descendo
-                num_print = 3
-                for idx in indices_validos:
-                    if idx in linhas_ja_capturadas:
-                        continue
-
-                    row_loc = linhas_notif.nth(idx)
-                    try:
-                        row_loc.evaluate("el => el.scrollIntoView({ block: 'start' })")
-                    except Exception:
-                        row_loc.scroll_into_view_if_needed()
-                    time.sleep(DELAY_ENTRE_ACOES_S)
-
-                    try:
-                        page.mouse.move(0, 0)
-                        time.sleep(0.3)
-                        page.evaluate("""() => {
-                            const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
-                            tooltips.forEach(t => t.remove());
-                        }""")
-                    except Exception:
-                        pass
-
-                    try:
-                        linhas_visiveis = page.evaluate("""() => {
-                            const rows = Array.from(document.querySelectorAll('ngx-datatable datatable-row-wrapper'));
-                            const vh = window.innerHeight;
-                            const vis = [];
-                            rows.forEach((r, i) => {
-                                const rect = r.getBoundingClientRect();
-                                const hVis = Math.min(rect.bottom, vh) - Math.max(rect.top, 0);
-                                if (hVis > 50 && rect.top < vh && rect.bottom > 0) {
-                                    vis.push(i);
-                                }
-                            });
-                            return vis;
-                        }""")
-                        linhas_ja_capturadas.update(linhas_visiveis)
-                    except Exception:
-                        linhas_ja_capturadas.add(idx)
-
-                    caminho_print_n = pasta_notificacao / f"{item_id}_{formatted_dt}_parte{num_print}.jpg"
-                    page.screenshot(path=str(caminho_print_n), type="jpeg")
-                    log_etapa(
-                        item_id,
-                        etapa,
-                        f"Print #{num_print} da tela inteira realizado descendo até a linha {idx} ({caminho_print_n.name}), cobrindo linha(s): {sorted(list(linhas_ja_capturadas))}.",
-                    )
-                    num_print += 1
-                    time.sleep(DELAY_ENTRE_ACOES_S)
 
             for idx, texto_data, linha_valida in dados_linhas:
                 etapa = f"Lendo a data da linha {idx}"
@@ -1596,8 +1580,10 @@ def processar_item_det(
                         f"Linha {idx} ignorada: data {texto_data} fora do critério (ModoTeste={MODO_TESTE}, hoje={hoje_date.strftime('%d/%m/%Y')})",
                     )
         else:
-            # Tabela vazia: tira o print de comprovação da tela de notificações vazia
+            # Tabela vazia: tira o print #1 (topo) e #2 (tabela vazia no rodapé) para comprovação
             try:
+                page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(0.3)
                 page.mouse.move(0, 0)
                 time.sleep(0.3)
                 page.evaluate("""() => {
@@ -1607,9 +1593,20 @@ def processar_item_det(
             except Exception:
                 pass
 
-            caminho_print_notif = pasta_notificacao / f"{item_id}_{formatted_dt}.jpg"
-            page.screenshot(path=str(caminho_print_notif), type="jpeg")
-            log_etapa(item_id, etapa, f"Print da tela de Notificação (vazia / sem notificações) realizado com sucesso: {caminho_print_notif.name}")
+            caminho_print_1 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte1.jpg"
+            page.screenshot(path=str(caminho_print_1), type="jpeg")
+            log_etapa(item_id, etapa, f"Print #1 da tela de Notificação (topo / sem notificações) realizado com sucesso: {caminho_print_1.name}")
+            time.sleep(DELAY_ENTRE_ACOES_S)
+
+            try:
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                time.sleep(0.3)
+            except Exception:
+                pass
+
+            caminho_print_2 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte2.jpg"
+            page.screenshot(path=str(caminho_print_2), type="jpeg")
+            log_etapa(item_id, etapa, f"Print #2 da tela de Notificação (rodapé / sem notificações) realizado com sucesso: {caminho_print_2.name}")
             time.sleep(DELAY_ENTRE_ACOES_S)
 
         # Retorna à tela de serviços
@@ -1706,10 +1703,11 @@ class ItemExecucao:
 
 def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[ItemExecucao]) -> Path:
     """
-    Cria a pasta Relatorios se não existir e gera o arquivo Excel com o histórico
+    Cria a pasta Resultados/Relatorios se não existir e gera o arquivo Excel com o histórico
     detalhado de todas as tentativas e status consolidado de cada CNPJ.
     """
-    pasta_relatorios = base_dir / "Relatorios"
+    pasta_resultados = base_dir / "Resultados"
+    pasta_relatorios = pasta_resultados / "Relatorios"
     pasta_relatorios.mkdir(parents=True, exist_ok=True)
     caminho_relatorio = pasta_relatorios / f"Relatorio_Execucao_{execucao_dt_str}.xlsx"
 
@@ -1785,10 +1783,13 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
 
 def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Optional[Path]:
     """
-    Gera a planilha CNPJs_Pendentes.xlsx contendo os CNPJs com falha temporária,
+    Gera a planilha PlanilhasBase/CNPJs_Pendentes.xlsx contendo os CNPJs com falha temporária,
     não executados ou bloqueados por 2FA. Caso não haja pendentes, remove qualquer versão residual anterior.
     """
-    caminho_pendentes = base_dir / "CNPJs_Pendentes.xlsx"
+    pasta_planilhas = base_dir / "PlanilhasBase"
+    pasta_planilhas.mkdir(parents=True, exist_ok=True)
+    caminho_pendentes = pasta_planilhas / "CNPJs_Pendentes.xlsx"
+    caminho_pendentes_raiz = base_dir / "CNPJs_Pendentes.xlsx"
     pendentes = [it for it in itens if it.status_final in ("FALHA_SISTEMA", "NAO_EXECUTADO", "EXIGE_2FA")]
 
     if pendentes:
@@ -1841,9 +1842,14 @@ def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Opti
         if caminho_pendentes.exists():
             try:
                 caminho_pendentes.unlink()
-                logger.info("[PENDENTES] Todos os CNPJs foram processados com sucesso. Arquivo 'CNPJs_Pendentes.xlsx' anterior removido.")
+                logger.info("[PENDENTES] Todos os CNPJs foram processados com sucesso. Arquivo 'PlanilhasBase/CNPJs_Pendentes.xlsx' removido.")
             except Exception as e:
-                logger.warning(f"[PENDENTES] Não foi possível remover planilha anterior de pendentes: {e}")
+                logger.warning(f"[PENDENTES] Não foi possível remover planilha de pendentes: {e}")
+        if caminho_pendentes_raiz.exists():
+            try:
+                caminho_pendentes_raiz.unlink()
+            except Exception:
+                pass
         return None
 
 
@@ -2390,22 +2396,37 @@ def executar_robo_hibrido(
         raise ValueError("O parâmetro 'base_dir' é obrigatório para executar o robô.")
     base_dir = Path(base_dir).resolve()
 
+    pasta_planilhas = base_dir / "PlanilhasBase"
+    pasta_planilhas.mkdir(parents=True, exist_ok=True)
+    pasta_resultados = base_dir / "Resultados"
+    pasta_resultados.mkdir(parents=True, exist_ok=True)
+
     if planilha_especifica:
         p = Path(planilha_especifica)
-        excel_path = p if p.is_absolute() else base_dir / p
+        if p.is_absolute():
+            excel_path = p
+        elif (pasta_planilhas / p).exists():
+            excel_path = pasta_planilhas / p
+        else:
+            excel_path = base_dir / p
     else:
-        excel_path = base_dir / "CNPJs.xlsx"
-        if not excel_path.exists():
-            legado_path = base_dir / "CNPJs-e-CPFs.xlsx"
-            if legado_path.exists():
-                excel_path = legado_path
+        if (pasta_planilhas / "CNPJs.xlsx").exists():
+            excel_path = pasta_planilhas / "CNPJs.xlsx"
+        elif (base_dir / "CNPJs.xlsx").exists():
+            excel_path = base_dir / "CNPJs.xlsx"
+        elif (pasta_planilhas / "CNPJs-e-CPFs.xlsx").exists():
+            excel_path = pasta_planilhas / "CNPJs-e-CPFs.xlsx"
+        elif (base_dir / "CNPJs-e-CPFs.xlsx").exists():
+            excel_path = base_dir / "CNPJs-e-CPFs.xlsx"
+        else:
+            excel_path = pasta_planilhas / "CNPJs.xlsx"
 
     hoje_date = datetime.now().date()
     execucao_dt_str = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
-    screenshots_raiz = base_dir / "CapturasDeTela-Downloads"
+    screenshots_raiz = pasta_resultados / "CapturasDeTela-Downloads"
     screenshots_dir = screenshots_raiz / execucao_dt_str
-    pasta_logs = base_dir / "Logs"
-    pasta_relatorios = base_dir / "Relatorios"
+    pasta_logs = pasta_resultados / "Logs"
+    pasta_relatorios = pasta_resultados / "Relatorios"
 
     # Garante a existência prévia das pastas da automação
     pasta_logs.mkdir(parents=True, exist_ok=True)

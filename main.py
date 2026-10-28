@@ -28,7 +28,8 @@ from src.certificados import atualizar_aba_certificados_disponiveis
 
 def configurar_logger(pasta_base: Path) -> Path:
     """Configura o logger 'RoboSocietario' para gravar no console e em arquivo .txt."""
-    pasta_logs = pasta_base / "Logs"
+    pasta_resultados = pasta_base / "Resultados"
+    pasta_logs = pasta_resultados / "Logs"
     pasta_logs.mkdir(parents=True, exist_ok=True)
 
     dt_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -138,34 +139,42 @@ def obter_argumentos() -> Tuple[Path, str, Optional[str], bool]:
         return pasta_base, "automacao", args.arquivo_planilha, eh_interativo
 
     # Operação padrão: Automação das consultas
-    p_pendentes = pasta_base / "CNPJs_Pendentes.xlsx"
-    p_principal = pasta_base / "CNPJs.xlsx"
-    if not p_principal.exists():
-        p_legado = pasta_base / "CNPJs-e-CPFs.xlsx"
-        if p_legado.exists():
-            p_principal = p_legado
+    pasta_planilhas = pasta_base / "PlanilhasBase"
+    pasta_planilhas.mkdir(parents=True, exist_ok=True)
+
+    p_pendentes = pasta_planilhas / "CNPJs_Pendentes.xlsx"
+    if not p_pendentes.exists() and (pasta_base / "CNPJs_Pendentes.xlsx").exists():
+        p_pendentes = pasta_base / "CNPJs_Pendentes.xlsx"
+
+    p_principal = pasta_planilhas / "CNPJs.xlsx"
+    if not p_principal.exists() and (pasta_base / "CNPJs.xlsx").exists():
+        p_principal = pasta_base / "CNPJs.xlsx"
+    elif not p_principal.exists() and (pasta_planilhas / "CNPJs-e-CPFs.xlsx").exists():
+        p_principal = pasta_planilhas / "CNPJs-e-CPFs.xlsx"
+    elif not p_principal.exists() and (pasta_base / "CNPJs-e-CPFs.xlsx").exists():
+        p_principal = pasta_base / "CNPJs-e-CPFs.xlsx"
 
     planilha_especifica = None
     # Apenas pergunta sobre pendentes se for uma execução interativa com usuário humano
     if eh_interativo and p_pendentes.exists() and p_principal.exists():
         print("\n" + "-" * 70)
         print(" [AVISO] Identificada planilha com itens pendentes da execução anterior:")
-        print("   [1] Executar base completa (CNPJs.xlsx)")
-        print("   [2] Reprocessar apenas pendentes anteriores (CNPJs_Pendentes.xlsx)")
+        print("   [1] Executar base completa (PlanilhasBase/CNPJs.xlsx)")
+        print("   [2] Reprocessar apenas pendentes anteriores (PlanilhasBase/CNPJs_Pendentes.xlsx)")
         print("-" * 70)
         try:
             escolha_pend = input(" Digite a opção [Pressione ENTER para opção 1]: ").strip()
             if escolha_pend == "2":
-                planilha_especifica = "CNPJs_Pendentes.xlsx"
+                planilha_especifica = str(p_pendentes)
             else:
-                planilha_especifica = p_principal.name
+                planilha_especifica = str(p_principal)
         except (EOFError, KeyboardInterrupt):
-            planilha_especifica = p_principal.name
+            planilha_especifica = str(p_principal)
         print()
     elif p_pendentes.exists() and not p_principal.exists():
-        planilha_especifica = "CNPJs_Pendentes.xlsx"
+        planilha_especifica = str(p_pendentes)
     else:
-        planilha_especifica = p_principal.name if p_principal.exists() else "CNPJs.xlsx"
+        planilha_especifica = str(p_principal) if p_principal.exists() else "CNPJs.xlsx"
 
     return pasta_base, "automacao", planilha_especifica, eh_interativo
 
@@ -175,11 +184,15 @@ def main():
 
     # Ramo 1: Apenas Atualização de Certificados Digitais no Excel
     if operacao == "certificados":
-        p_excel = pasta_base / "CNPJs.xlsx"
+        pasta_planilhas = pasta_base / "PlanilhasBase"
+        pasta_planilhas.mkdir(parents=True, exist_ok=True)
+        p_excel = pasta_planilhas / "CNPJs.xlsx"
+        if not p_excel.exists() and (pasta_base / "CNPJs.xlsx").exists():
+            p_excel = pasta_base / "CNPJs.xlsx"
         print("\n" + "=" * 70)
         print(" ATUALIZAÇÃO DE CERTIFICADOS DIGITAIS (WINDOWS)")
         print(f" Pasta Base: {pasta_base}")
-        print(f" Planilha:   {p_excel.name}")
+        print(f" Planilha:   {p_excel}")
         print("=" * 70)
         print(" Localizando certificados instalados em 'Certificados - Usuário Atual'...")
         codigo_saida = 0
@@ -189,7 +202,7 @@ def main():
             print(f" Aba atualizada: 'Certificados_Disponiveis' na planilha:")
             print(f" -> {p_excel}")
             print("\n Instruções para preenchimento:")
-            print(" 1. Abra a planilha 'CNPJs.xlsx'.")
+            print(" 1. Abra a planilha em 'PlanilhasBase/CNPJs.xlsx'.")
             print(" 2. Consulte os certificados disponíveis na aba 'Certificados_Disponiveis'.")
             print(" 3. Na aba 'CNPJs_consultados', preencha a coluna 'Certificado' com a Razão Social ou CNPJ.")
             print(" 4. Salve e feche a planilha antes de rodar a automação do robô.")
@@ -214,12 +227,17 @@ def main():
     # Garante que a pasta base existe
     try:
         pasta_base.mkdir(parents=True, exist_ok=True)
+        (pasta_base / "PlanilhasBase").mkdir(parents=True, exist_ok=True)
+        (pasta_base / "Resultados").mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        print(f"[ERRO CRÍTICO] Falha ao acessar ou criar a pasta base '{pasta_base}': {e}", file=sys.stderr)
+        print(f"[ERRO CRÍTICO] Falha ao acessar ou criar as pastas base: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Atualiza preventivamente a aba de certificados na planilha padrão se possível
-    p_excel_padrao = pasta_base / "CNPJs.xlsx"
+    pasta_planilhas = pasta_base / "PlanilhasBase"
+    p_excel_padrao = pasta_planilhas / "CNPJs.xlsx"
+    if not p_excel_padrao.exists() and (pasta_base / "CNPJs.xlsx").exists():
+        p_excel_padrao = pasta_base / "CNPJs.xlsx"
     if p_excel_padrao.exists():
         try:
             atualizar_aba_certificados_disponiveis(p_excel_padrao)
