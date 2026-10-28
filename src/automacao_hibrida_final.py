@@ -1456,60 +1456,60 @@ def processar_item_det(
             )
             time.sleep(DELAY_ENTRE_ACOES_S)
 
-            # 3. Se houver notificações mais abaixo que ainda não apareceram no print rolado, vai descendo
-            num_print = 3
-            indices_para_percorrer = [idx for idx, _, val in dados_linhas if val]
-            if not indices_para_percorrer:
-                indices_para_percorrer = [idx for idx, _, _ in dados_linhas]
+            # 3. Se houver notificações VÁLIDAS mais abaixo que ainda não apareceram no print rolado, vai descendo
+            # Quando NÃO há notificações válidas (data fora do critério), encerra em exatamente 2 prints (topo + rolagem única)
+            indices_validos_restantes = [idx for idx, _, val in dados_linhas if val]
 
-            for idx in indices_para_percorrer:
-                if idx in linhas_ja_capturadas:
-                    continue
+            if indices_validos_restantes:
+                num_print = 3
+                for idx in indices_validos_restantes:
+                    if idx in linhas_ja_capturadas:
+                        continue
 
-                row_loc = linhas_notif.nth(idx)
-                try:
-                    row_loc.evaluate("el => el.scrollIntoView({ block: 'start' })")
-                except Exception:
-                    row_loc.scroll_into_view_if_needed()
-                time.sleep(DELAY_ENTRE_ACOES_S)
+                    row_loc = linhas_notif.nth(idx)
+                    try:
+                        row_loc.evaluate("el => el.scrollIntoView({ block: 'start' })")
+                    except Exception:
+                        row_loc.scroll_into_view_if_needed()
+                    time.sleep(DELAY_ENTRE_ACOES_S)
 
-                try:
-                    page.mouse.move(0, 0)
-                    time.sleep(0.3)
-                    page.evaluate("""() => {
-                        const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
-                        tooltips.forEach(t => t.remove());
-                    }""")
-                except Exception:
-                    pass
+                    try:
+                        page.mouse.move(0, 0)
+                        time.sleep(0.3)
+                        page.evaluate("""() => {
+                            const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                            tooltips.forEach(t => t.remove());
+                        }""")
+                    except Exception:
+                        pass
 
-                try:
-                    linhas_visiveis = page.evaluate("""() => {
-                        const rows = Array.from(document.querySelectorAll('ngx-datatable datatable-row-wrapper'));
-                        const vh = window.innerHeight;
-                        const vis = [];
-                        rows.forEach((r, i) => {
-                            const rect = r.getBoundingClientRect();
-                            const hVis = Math.min(rect.bottom, vh) - Math.max(rect.top, 0);
-                            if (hVis > 50 && rect.top < vh && rect.bottom > 0) {
-                                vis.push(i);
-                            }
-                        });
-                        return vis;
-                    }""")
-                    linhas_ja_capturadas.update(linhas_visiveis)
-                except Exception:
-                    linhas_ja_capturadas.add(idx)
+                    try:
+                        linhas_visiveis = page.evaluate("""() => {
+                            const rows = Array.from(document.querySelectorAll('ngx-datatable datatable-row-wrapper'));
+                            const vh = window.innerHeight;
+                            const vis = [];
+                            rows.forEach((r, i) => {
+                                const rect = r.getBoundingClientRect();
+                                const hVis = Math.min(rect.bottom, vh) - Math.max(rect.top, 0);
+                                if (hVis > 50 && rect.top < vh && rect.bottom > 0) {
+                                    vis.push(i);
+                                }
+                            });
+                            return vis;
+                        }""")
+                        linhas_ja_capturadas.update(linhas_visiveis)
+                    except Exception:
+                        linhas_ja_capturadas.add(idx)
 
-                caminho_print_n = pasta_notificacao / f"{item_id}_{formatted_dt}_parte{num_print}.jpg"
-                page.screenshot(path=str(caminho_print_n), type="jpeg")
-                log_etapa(
-                    item_id,
-                    etapa,
-                    f"Print #{num_print} da tela inteira realizado descendo até a linha {idx} ({caminho_print_n.name}), cobrindo linha(s): {sorted(list(linhas_ja_capturadas))}.",
-                )
-                num_print += 1
-                time.sleep(DELAY_ENTRE_ACOES_S)
+                    caminho_print_n = pasta_notificacao / f"{item_id}_{formatted_dt}_parte{num_print}.jpg"
+                    page.screenshot(path=str(caminho_print_n), type="jpeg")
+                    log_etapa(
+                        item_id,
+                        etapa,
+                        f"Print #{num_print} da tela inteira realizado descendo até a linha {idx} ({caminho_print_n.name}), cobrindo linha(s): {sorted(list(linhas_ja_capturadas))}.",
+                    )
+                    num_print += 1
+                    time.sleep(DELAY_ENTRE_ACOES_S)
 
             for idx, texto_data, linha_valida in dados_linhas:
                 etapa = f"Lendo a data da linha {idx}"
