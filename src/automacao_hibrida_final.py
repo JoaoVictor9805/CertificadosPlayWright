@@ -2066,28 +2066,42 @@ def processar_sessao_certificado(
 
     try:
         # ==================================================================
-        # FASE 1: Login com Retry contra Captcha e Fallback de 60s contra Gov.br Fora do Ar
+        # FASE 1 e 2: Autenticação no Gov.br e Validação da Sessão no DET
+        # (3 Tentativas com Intervalo de 60s em Caso de Instabilidade do Portal)
         # ==================================================================
         MAX_TENTATIVAS_CAPTCHA = 5
         MAX_TENTATIVAS_PORTAL = 3
-        sucesso_fase1 = False
+        sessao_estabelecida = False
 
         for tentativa_portal in range(1, MAX_TENTATIVAS_PORTAL + 1):
             if stop_event and stop_event.is_set():
                 break
 
-            falha_botoes_portal = False
+            falha_portal = False
+            motivo_falha_portal = "Instabilidade na resposta do portal Gov.br / DET"
+            sucesso_cert = False
 
+            # Sub-etapa: Localização de botões e seleção do certificado com retry contra Captcha
             for tentativa_captcha in range(1, MAX_TENTATIVAS_CAPTCHA + 1):
                 if stop_event and stop_event.is_set():
                     break
 
                 logger.info(
-                    f"\n>>> Fase 1 (Portal {tentativa_portal}/{MAX_TENTATIVAS_PORTAL} | "
-                    f"Tentativa {tentativa_captcha}/{MAX_TENTATIVAS_CAPTCHA}): "
+                    f"\n>>> Conexão ao Portal (Tentativa {tentativa_portal}/{MAX_TENTATIVAS_PORTAL} | "
+                    f"Captcha {tentativa_captcha}/{MAX_TENTATIVAS_CAPTCHA}): "
                     f"Abertura do Chrome e Login gov.br para '{nome_cert_exibicao}'..."
                 )
                 fechar_navegador(browser, context, page)
+                if playwright_mgr:
+                    try:
+                        playwright_mgr.stop()
+                    except Exception:
+                        pass
+                    playwright_mgr = None
+                browser = None
+                context = None
+                page = None
+
                 liberar_porta_se_ocupada()
                 iniciar_chrome_hibrido()
 
@@ -2097,27 +2111,24 @@ def processar_sessao_certificado(
                     time.sleep(2)
 
                     if stop_event and stop_event.is_set():
-                        fechar_navegador(browser, context, page)
                         break
 
                     if not clicar_botao_govbr_garantido(timeout_segundos=25):
                         logger.warning("Não foi possível localizar o botão 'Entrar com gov.br'.")
-                        falha_botoes_portal = True
-                        fechar_navegador(browser, context, page)
+                        falha_portal = True
+                        motivo_falha_portal = "Botão 'Entrar com gov.br' não encontrado"
                         break
 
                     if stop_event and stop_event.is_set():
-                        fechar_navegador(browser, context, page)
                         break
 
                     if not clicar_botao_certificado_garantido(timeout_segundos=30):
                         logger.warning("Não foi possível localizar 'Seu certificado digital'.")
-                        falha_botoes_portal = True
-                        fechar_navegador(browser, context, page)
+                        falha_portal = True
+                        motivo_falha_portal = "Opção 'Seu certificado digital' não encontrada"
                         break
 
                     if stop_event and stop_event.is_set():
-                        fechar_navegador(browser, context, page)
                         break
 
                     # Seleciona o certificado específico do grupo no popup nativo
@@ -2149,8 +2160,8 @@ def processar_sessao_certificado(
                         fechar_navegador(browser, context, page)
                         return False
 
-                    sucesso_fase1 = True
-                    break  # Login com sucesso!
+                    # Certificado confirmado no popup nativo!
+                    break
 
                 except VerificacaoDuasEtapasException:
                     registrar_pulo_2fa(
@@ -2180,45 +2191,243 @@ def processar_sessao_certificado(
                     time.sleep(3)
                     if tentativa_captcha == MAX_TENTATIVAS_CAPTCHA:
                         logger.error(f"[CAPTCHA] Limite de {MAX_TENTATIVAS_CAPTCHA} tentativas atingido para '{nome_cert_exibicao}'.")
-                        falha_botoes_portal = True
+                        falha_portal = True
+                        motivo_falha_portal = "Bloqueio persistente por Captcha no gov.br"
                         break
 
-            if sucesso_fase1:
-                break
-
-            # Se houve falha de portal (site fora do ar ou botões não surgiram):
-            if falha_botoes_portal and tentativa_portal < MAX_TENTATIVAS_PORTAL:
-                logger.warning("\n" + "=" * 80)
-                logger.warning("[ATENÇÃO - NÃO MEXA NO COMPUTADOR]")
-                logger.warning("O portal gov.br apresentou instabilidade ou lentidão na resposta.")
-                logger.warning(f"O navegador será reiniciado e aguardará 60 segundos antes da tentativa {tentativa_portal + 1}/{MAX_TENTATIVAS_PORTAL}.")
-                logger.warning("=" * 80 + "\n")
+            # Se houve falha nos botões ou no captcha antes de selecionar o certificado
+            if falha_portal:
                 fechar_navegador(browser, context, page)
+                if playwright_mgr:
+                    try:
+                        playwright_mgr.stop()
+                    except Exception:
+                        pass
+                    playwright_mgr = None
+                browser = None
+                context = None
+                page = None
 
-                for seg_restantes in range(60, 0, -10):
-                    if stop_event and stop_event.is_set():
-                        break
-                    logger.info(f"[AGUARDE] Tentando reconexão ao gov.br em {seg_restantes} segundos... (Não mexa no computador)")
+                if tentativa_portal < MAX_TENTATIVAS_PORTAL:
+                    logger.warning("\n" + "=" * 80)
+                    logger.warning("[ATENÇÃO - NÃO MEXA NO COMPUTADOR]")
+                    logger.warning(f"O portal gov.br apresentou instabilidade: {motivo_falha_portal}.")
+                    logger.warning(f"O navegador será reiniciado e aguardará 60 segundos antes da tentativa {tentativa_portal + 1}/{MAX_TENTATIVAS_PORTAL}.")
+                    logger.warning("=" * 80 + "\n")
+
+                    for seg_restantes in range(60, 0, -10):
+                        if stop_event and stop_event.is_set():
+                            break
+                        logger.info(f"[AGUARDE] Tentando reconexão ao gov.br em {seg_restantes} segundos... (Não mexa no computador)")
+                        if progress_callback:
+                            progress_callback(
+                                item_global_counter[0],
+                                total_itens,
+                                f"Gov.br instável. Aguardando {seg_restantes}s para tentar novamente...",
+                            )
+                        time.sleep(10)
+                    continue
+                else:
+                    logger.error(f"[PORTAL GOV.BR INDISPONÍVEL] O portal não respondeu após {MAX_TENTATIVAS_PORTAL} tentativas com intervalo de 60s.")
+                    caminho_print_erro_gov = screenshots_dir / f"erro_govbr_indisponivel_{nome_cert_exibicao[:20]}.jpg"
+                    try:
+                        pyautogui.screenshot(str(caminho_print_erro_gov))
+                        logger.info(f"[COMPROVANTE] Screenshot do erro no gov.br salvo em: {caminho_print_erro_gov.name}")
+                    except Exception:
+                        pass
+
+                    for doc in lista_cnpjs:
+                        it = mapa_itens[doc]
+                        msg = f"Portal Gov.br indisponível após {MAX_TENTATIVAS_PORTAL} tentativas (espera de 60s)"
+                        if rodada == 1:
+                            it.status_t1 = "NAO_EXECUTADO"
+                            it.detalhe_t1 = msg
+                        else:
+                            it.status_t2 = "NAO_EXECUTADO"
+                            it.detalhe_t2 = msg
+                        it.status_final = "NAO_EXECUTADO"
+                        it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+                    item_global_counter[0] += len(lista_cnpjs)
                     if progress_callback:
                         progress_callback(
                             item_global_counter[0],
                             total_itens,
-                            f"Gov.br instável. Aguardando {seg_restantes}s para tentar novamente...",
+                            f"Grupo {num_grupo}/{total_grupos} falhou: Portal Gov.br indisponível",
+                        )
+                    fechar_navegador(browser, context, page)
+                    return False
+
+            # Conecta o Playwright via CDP para validar a chegada ao DET
+            logger.info(f"Certificado '{nome_cert_exibicao}' autenticado no Windows. Conectando Playwright para validar chegada ao DET...")
+            playwright_mgr = sync_playwright().start()
+
+            for tentativa_cdp in range(1, 6):
+                if stop_event and stop_event.is_set():
+                    break
+                try:
+                    browser = playwright_mgr.chromium.connect_over_cdp(
+                        f"http://127.0.0.1:{CDP_PORT}",
+                        slow_mo=DELAY_SLOW_MO_MS
+                    )
+                    break
+                except Exception:
+                    time.sleep(2)
+
+            if not browser:
+                logger.warning(f"Não foi possível conectar o Playwright via CDP na tentativa {tentativa_portal}/{MAX_TENTATIVAS_PORTAL}.")
+                falha_portal = True
+                motivo_falha_portal = "Falha de conexão CDP do Playwright"
+            else:
+                context = browser.contexts[0]
+                page = context.pages[0] if context.pages else context.new_page()
+
+                inicio_espera = time.time()
+                timeout_login = 45
+                tela_2fa_detectada = False
+                pagina_2fa = None
+
+                logger.info(f"Aguardando autenticação e carregamento do portal DET para '{nome_cert_exibicao}'...")
+
+                while time.time() - inicio_espera < timeout_login:
+                    if stop_event and stop_event.is_set():
+                        break
+
+                    # 1. Verifica se a tela de 2FA surgiu em alguma das páginas do navegador
+                    tem_2fa, p_2fa = verificar_2fa_em_todas_paginas(context)
+                    if not tem_2fa and detectar_presenca_2fa_uia():
+                        tem_2fa = True
+                        p_2fa = page
+
+                    if tem_2fa:
+                        tela_2fa_detectada = True
+                        pagina_2fa = p_2fa
+                        break
+
+                    # 2. Verifica se surgiu tela de erro inesperado do DET (tela vermelha / erro na requisição)
+                    det_com_erro = False
+                    for p in context.pages:
+                        if not p.is_closed():
+                            try:
+                                url_p = p.url.lower()
+                                if "det.sit.trabalho.gov.br" in url_p or "acessogov" in url_p:
+                                    tem_erro_msg = p.evaluate("""() => {
+                                        const txt = (document.body.innerText || '').toLowerCase();
+                                        return txt.includes('erro inesperado ao processar a requisição') || 
+                                               txt.includes('erro inesperado ao processar a requisicao') ||
+                                               txt.includes('erro inesperado ao processar');
+                                    }""")
+                                    if tem_erro_msg:
+                                        det_com_erro = True
+                                        break
+                            except Exception:
+                                pass
+
+                    if det_com_erro:
+                        logger.warning(
+                            f"[DET INSTÁVEL] Detectada mensagem 'Erro inesperado ao processar a requisição' no portal DET "
+                            f"(tentativa {tentativa_portal}/{MAX_TENTATIVAS_PORTAL})."
+                        )
+                        falha_portal = True
+                        motivo_falha_portal = "Erro inesperado ao processar a requisição no DET"
+                        break
+
+                    # 3. Verifica se houve sucesso de login e chegada no DET (/servicos com card CAIXA POSTAL)
+                    for p in reversed(context.pages):
+                        if not p.is_closed():
+                            try:
+                                url_p = p.url.lower()
+                                if "det.sit.trabalho.gov.br" in url_p or "/servicos" in url_p:
+                                    card = p.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
+                                    if card.is_visible():
+                                        page = p
+                                        sessao_estabelecida = True
+                                        break
+                            except Exception:
+                                pass
+                    if sessao_estabelecida:
+                        break
+
+                    time.sleep(1.0)
+
+                if tela_2fa_detectada:
+                    registrar_pulo_2fa(
+                        lista_cnpjs=lista_cnpjs,
+                        mapa_itens=mapa_itens,
+                        nome_cert_exibicao=nome_cert_exibicao,
+                        rodada=rodada,
+                        num_grupo=num_grupo,
+                        total_grupos=total_grupos,
+                        total_itens=total_itens,
+                        item_global_counter=item_global_counter,
+                        pasta_cert=pasta_cert,
+                        base_dir=base_dir,
+                        execucao_dt_str=execucao_dt_str,
+                        pagina_2fa=pagina_2fa,
+                        progress_callback=progress_callback,
+                    )
+                    fechar_navegador(browser, context, page)
+                    if playwright_mgr:
+                        try:
+                            playwright_mgr.stop()
+                        except Exception:
+                            pass
+                    return False
+
+                if not sessao_estabelecida and not falha_portal:
+                    logger.warning(
+                        f"Tempo limite esgotado ({timeout_login}s) aguardando chegada ao DET "
+                        f"(tentativa {tentativa_portal}/{MAX_TENTATIVAS_PORTAL})."
+                    )
+                    falha_portal = True
+                    motivo_falha_portal = "Tempo limite esgotado aguardando carregamento do portal DET"
+
+            if sessao_estabelecida:
+                logger.info(f"Sessão ativa estabelecida com sucesso no portal DET para certificado '{nome_cert_exibicao}'!")
+                break
+
+            # Se falhou nesta tentativa de portal:
+            fechar_navegador(browser, context, page)
+            if playwright_mgr:
+                try:
+                    playwright_mgr.stop()
+                except Exception:
+                    pass
+                playwright_mgr = None
+            browser = None
+            context = None
+            page = None
+
+            if tentativa_portal < MAX_TENTATIVAS_PORTAL:
+                logger.warning("\n" + "=" * 80)
+                logger.warning("[ATENÇÃO - NÃO MEXA NO COMPUTADOR]")
+                logger.warning(f"O portal DET / gov.br apresentou instabilidade: {motivo_falha_portal}.")
+                logger.warning(f"O navegador será reiniciado e aguardará 60 segundos antes da tentativa {tentativa_portal + 1}/{MAX_TENTATIVAS_PORTAL}.")
+                logger.warning("=" * 80 + "\n")
+
+                for seg_restantes in range(60, 0, -10):
+                    if stop_event and stop_event.is_set():
+                        break
+                    logger.info(f"[AGUARDE] Tentando reconexão ao DET/gov.br em {seg_restantes} segundos... (Não mexa no computador)")
+                    if progress_callback:
+                        progress_callback(
+                            item_global_counter[0],
+                            total_itens,
+                            f"DET/Gov.br instável. Aguardando {seg_restantes}s para tentar novamente...",
                         )
                     time.sleep(10)
-            elif falha_botoes_portal and tentativa_portal >= MAX_TENTATIVAS_PORTAL:
-                # Esgotou as 3 tentativas do portal
-                logger.error(f"[PORTAL GOV.BR INDISPONÍVEL] O portal não respondeu após 3 tentativas com intervalo de 60s.")
-                caminho_print_erro_gov = screenshots_dir / f"erro_govbr_indisponivel_{nome_cert_exibicao[:20]}.jpg"
+            else:
+                logger.error(f"[PORTAL DET/GOV.BR INDISPONÍVEL] O portal não respondeu após {MAX_TENTATIVAS_PORTAL} tentativas com intervalo de 60s: {motivo_falha_portal}.")
+                caminho_print_erro_gov = screenshots_dir / f"erro_det_indisponivel_{nome_cert_exibicao[:20]}.jpg"
                 try:
                     pyautogui.screenshot(str(caminho_print_erro_gov))
-                    logger.info(f"[COMPROVANTE] Screenshot do erro no gov.br salvo em: {caminho_print_erro_gov.name}")
+                    logger.info(f"[COMPROVANTE] Screenshot do erro no DET salvo em: {caminho_print_erro_gov.name}")
                 except Exception:
                     pass
 
                 for doc in lista_cnpjs:
                     it = mapa_itens[doc]
-                    msg = "Portal Gov.br indisponível após 3 tentativas (espera de 60s)"
+                    msg = f"Portal DET/Gov.br indisponível após {MAX_TENTATIVAS_PORTAL} tentativas (espera de 60s): {motivo_falha_portal}"
                     if rodada == 1:
                         it.status_t1 = "NAO_EXECUTADO"
                         it.detalhe_t1 = msg
@@ -2233,142 +2442,11 @@ def processar_sessao_certificado(
                     progress_callback(
                         item_global_counter[0],
                         total_itens,
-                        f"Grupo {num_grupo}/{total_grupos} falhou: Portal Gov.br indisponível",
+                        f"Grupo {num_grupo}/{total_grupos} falhou: Portal DET/Gov.br indisponível",
                     )
-                fechar_navegador(browser, context, page)
                 return False
 
-        if not sucesso_fase1:
-            fechar_navegador(browser, context, page)
-            return False
-
-        logger.info(f"Fase 1 concluída: Certificado '{nome_cert_exibicao}' autenticado. Conectando Playwright...")
-
-        # ==================================================================
-        # FASE 2: Conexão Playwright via CDP
-        # ==================================================================
-        playwright_mgr = sync_playwright().start()
-
-        for tentativa_cdp in range(1, 6):
-            if stop_event and stop_event.is_set():
-                break
-            try:
-                browser = playwright_mgr.chromium.connect_over_cdp(
-                    f"http://127.0.0.1:{CDP_PORT}",
-                    slow_mo=DELAY_SLOW_MO_MS
-                )
-                break
-            except Exception:
-                time.sleep(2)
-
-        if not browser:
-            logger.error("Erro fatal: Não foi possível conectar o Playwright via CDP após 5 tentativas.")
-            if playwright_mgr:
-                playwright_mgr.stop()
-            for doc in lista_cnpjs:
-                it = mapa_itens[doc]
-                msg = "Falha de conexão CDP do Playwright"
-                if rodada == 1:
-                    it.status_t1 = "FALHA_SISTEMA"
-                    it.detalhe_t1 = msg
-                else:
-                    it.status_t2 = "FALHA_SISTEMA"
-                    it.detalhe_t2 = msg
-                it.status_final = "FALHA_SISTEMA"
-                it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            return False
-
-        context = browser.contexts[0]
-        page = context.pages[0] if context.pages else context.new_page()
-
-        inicio_espera = time.time()
-        timeout_login = 45
-        sessao_estabelecida = False
-        tela_2fa_detectada = False
-        pagina_2fa = None
-
-        logger.info(f"Aguardando autenticação e carregamento do portal DET para '{nome_cert_exibicao}'...")
-
-        while time.time() - inicio_espera < timeout_login:
-            if stop_event and stop_event.is_set():
-                break
-
-            # 1. Verifica se a tela de 2FA surgiu em alguma das páginas do navegador
-            tem_2fa, p_2fa = verificar_2fa_em_todas_paginas(context)
-            if not tem_2fa and detectar_presenca_2fa_uia():
-                tem_2fa = True
-                p_2fa = page
-
-            if tem_2fa:
-                tela_2fa_detectada = True
-                pagina_2fa = p_2fa
-                break
-
-            # 2. Verifica se houve sucesso de login e chegada no DET (/servicos)
-            for p in reversed(context.pages):
-                if not p.is_closed():
-                    try:
-                        url_p = p.url.lower()
-                        if "det.sit.trabalho.gov.br" in url_p or "/servicos" in url_p:
-                            card = p.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))")
-                            if card.is_visible():
-                                page = p
-                                sessao_estabelecida = True
-                                break
-                    except Exception:
-                        pass
-            if sessao_estabelecida:
-                break
-
-            time.sleep(1.0)
-
-        if tela_2fa_detectada:
-            registrar_pulo_2fa(
-                lista_cnpjs=lista_cnpjs,
-                mapa_itens=mapa_itens,
-                nome_cert_exibicao=nome_cert_exibicao,
-                rodada=rodada,
-                num_grupo=num_grupo,
-                total_grupos=total_grupos,
-                total_itens=total_itens,
-                item_global_counter=item_global_counter,
-                pasta_cert=pasta_cert,
-                base_dir=base_dir,
-                execucao_dt_str=execucao_dt_str,
-                pagina_2fa=pagina_2fa,
-                progress_callback=progress_callback,
-            )
-            fechar_navegador(browser, context, page)
-            if playwright_mgr:
-                try:
-                    playwright_mgr.stop()
-                except Exception:
-                    pass
-            return False
-
         if not sessao_estabelecida:
-            logger.error(
-                f"Tempo limite esgotado ({timeout_login}s) aguardando login ou portal DET para '{nome_cert_exibicao}'."
-            )
-            for doc in lista_cnpjs:
-                it = mapa_itens[doc]
-                msg = "Tempo limite esgotado aguardando carregamento do portal DET"
-                if rodada == 1:
-                    it.status_t1 = "FALHA_SISTEMA"
-                    it.detalhe_t1 = msg
-                else:
-                    it.status_t2 = "FALHA_SISTEMA"
-                    it.detalhe_t2 = msg
-                it.status_final = "FALHA_SISTEMA"
-                it.data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-
-            item_global_counter[0] += len(lista_cnpjs)
-            if progress_callback:
-                progress_callback(
-                    item_global_counter[0],
-                    total_itens,
-                    f"Grupo {num_grupo}/{total_grupos} falhou: Timeout no portal DET",
-                )
             fechar_navegador(browser, context, page)
             if playwright_mgr:
                 try:
