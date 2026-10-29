@@ -1316,16 +1316,115 @@ def processar_item_det(
         card_notificacao.click()
         time.sleep(DELAY_ENTRE_ACOES_S)
 
-        etapa = "Tirando o print da Notificação"
+        etapa = "Verificando tela de Notificações"
         linhas_notif = page.locator("ngx-datatable datatable-row-wrapper")
-        try:
-            linhas_notif.first.wait_for(state="visible", timeout=10000)
-            tem_notificacoes = True
-        except PlaywrightTimeoutError:
-            tem_notificacoes = False
+        locator_sem_notif = page.locator(
+            "text=/nenhuma notifica[çc][ãa]o encontrada/i, "
+            ".empty-row:has-text('Nenhuma notificação encontrada'), "
+            "div:has-text('Nenhuma notificação encontrada')"
+        )
 
-        etapa = "Lendo a lista de notificações"
-        if tem_notificacoes:
+        tem_notificacoes = False
+        sem_notificacoes = False
+
+        inicio_espera = time.time()
+        while time.time() - inicio_espera < 12:
+            if stop_event and stop_event.is_set():
+                break
+
+            # 1. Verifica se surgiu a mensagem 'Nenhuma notificação encontrada'
+            try:
+                if locator_sem_notif.count() > 0 and locator_sem_notif.first.is_visible():
+                    sem_notificacoes = True
+                    break
+            except Exception:
+                pass
+
+            try:
+                tem_texto = page.evaluate("""() => {
+                    const txt = (document.body.innerText || '').toLowerCase();
+                    return txt.includes('nenhuma notificação encontrada') || txt.includes('nenhuma notificacao encontrada');
+                }""")
+                if tem_texto:
+                    sem_notificacoes = True
+                    break
+            except Exception:
+                pass
+
+            # 2. Verifica se surgiram linhas na tabela de notificações
+            try:
+                if linhas_notif.count() > 0 and linhas_notif.first.is_visible():
+                    tem_notificacoes = True
+                    break
+            except Exception:
+                pass
+
+            time.sleep(0.4)
+
+        # Se esgotou o tempo de espera sem definir claramente:
+        if not tem_notificacoes and not sem_notificacoes:
+            try:
+                tem_texto = page.evaluate("""() => {
+                    const txt = (document.body.innerText || '').toLowerCase();
+                    return txt.includes('nenhuma notificação encontrada') || txt.includes('nenhuma notificacao encontrada');
+                }""")
+                if tem_texto:
+                    sem_notificacoes = True
+                elif linhas_notif.count() > 0:
+                    tem_notificacoes = True
+                else:
+                    sem_notificacoes = True
+            except Exception:
+                sem_notificacoes = True
+
+        if sem_notificacoes:
+            etapa = "Tirando print da tela de Notificações (Sem Notificações)"
+            log_etapa(
+                item_id,
+                etapa,
+                "Texto 'Nenhuma notificação encontrada' identificado. Tirando print único comprobatório sem rolagens adicionais.",
+            )
+
+            # Posiciona no topo
+            try:
+                page.evaluate("window.scrollTo(0, 0)")
+            except Exception:
+                pass
+            time.sleep(DELAY_ENTRE_ACOES_S)
+
+            try:
+                page.mouse.move(0, 0)
+                time.sleep(0.3)
+                page.evaluate("""() => {
+                    const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+                    tooltips.forEach(t => t.remove());
+
+                    // Em telas menores, ajusta o scroll minimamente para que a mensagem apareça sem esconder o cabeçalho
+                    const el = Array.from(document.querySelectorAll('*')).find(e => 
+                        e.children.length === 0 && e.innerText && 
+                        (e.innerText.toLowerCase().includes('nenhuma notificação encontrada') || e.innerText.toLowerCase().includes('nenhuma notificacao encontrada'))
+                    );
+                    if (el) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.bottom > window.innerHeight) {
+                            window.scrollBy(0, Math.min(rect.bottom - window.innerHeight + 30, 200));
+                        }
+                    }
+                }""")
+            except Exception:
+                pass
+
+            caminho_print_1 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte1.jpg"
+            page.screenshot(path=str(caminho_print_1), type="jpeg")
+            log_etapa(
+                item_id,
+                etapa,
+                f"Print único da tela de Notificação ('Nenhuma notificação encontrada') realizado com sucesso: {caminho_print_1.name}",
+            )
+            time.sleep(DELAY_ENTRE_ACOES_S)
+
+        elif tem_notificacoes and linhas_notif.count() > 0:
+            etapa = "Lendo a lista de notificações"
             qtd_linhas = linhas_notif.count()
             log_etapa(
                 item_id,
@@ -1580,7 +1679,7 @@ def processar_item_det(
                         f"Linha {idx} ignorada: data {texto_data} fora do critério (ModoTeste={MODO_TESTE}, hoje={hoje_date.strftime('%d/%m/%Y')})",
                     )
         else:
-            # Tabela vazia: tira o print #1 (topo) e #2 (tabela vazia no rodapé) para comprovação
+            # Caso residual sem linhas ou sem notificações: tira print único comprobatório
             try:
                 page.evaluate("window.scrollTo(0, 0)")
                 time.sleep(0.3)
@@ -1595,18 +1694,7 @@ def processar_item_det(
 
             caminho_print_1 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte1.jpg"
             page.screenshot(path=str(caminho_print_1), type="jpeg")
-            log_etapa(item_id, etapa, f"Print #1 da tela de Notificação (topo / sem notificações) realizado com sucesso: {caminho_print_1.name}")
-            time.sleep(DELAY_ENTRE_ACOES_S)
-
-            try:
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(0.3)
-            except Exception:
-                pass
-
-            caminho_print_2 = pasta_notificacao / f"{item_id}_{formatted_dt}_parte2.jpg"
-            page.screenshot(path=str(caminho_print_2), type="jpeg")
-            log_etapa(item_id, etapa, f"Print #2 da tela de Notificação (rodapé / sem notificações) realizado com sucesso: {caminho_print_2.name}")
+            log_etapa(item_id, etapa, f"Print único da tela de Notificação (sem notificações) realizado com sucesso: {caminho_print_1.name}")
             time.sleep(DELAY_ENTRE_ACOES_S)
 
         # Retorna à tela de serviços
@@ -1981,7 +2069,7 @@ def processar_sessao_certificado(
         # FASE 1: Login com Retry contra Captcha e Fallback de 60s contra Gov.br Fora do Ar
         # ==================================================================
         MAX_TENTATIVAS_CAPTCHA = 5
-        MAX_TENTATIVAS_PORTAL = 2
+        MAX_TENTATIVAS_PORTAL = 3
         sucesso_fase1 = False
 
         for tentativa_portal in range(1, MAX_TENTATIVAS_PORTAL + 1):
@@ -2119,8 +2207,8 @@ def processar_sessao_certificado(
                         )
                     time.sleep(10)
             elif falha_botoes_portal and tentativa_portal >= MAX_TENTATIVAS_PORTAL:
-                # Esgotou as 2 tentativas do portal
-                logger.error(f"[PORTAL GOV.BR INDISPONÍVEL] O portal não respondeu após 2 tentativas com intervalo de 60s.")
+                # Esgotou as 3 tentativas do portal
+                logger.error(f"[PORTAL GOV.BR INDISPONÍVEL] O portal não respondeu após 3 tentativas com intervalo de 60s.")
                 caminho_print_erro_gov = screenshots_dir / f"erro_govbr_indisponivel_{nome_cert_exibicao[:20]}.jpg"
                 try:
                     pyautogui.screenshot(str(caminho_print_erro_gov))
@@ -2130,7 +2218,7 @@ def processar_sessao_certificado(
 
                 for doc in lista_cnpjs:
                     it = mapa_itens[doc]
-                    msg = "Portal Gov.br indisponível após 2 tentativas (espera de 60s)"
+                    msg = "Portal Gov.br indisponível após 3 tentativas (espera de 60s)"
                     if rodada == 1:
                         it.status_t1 = "NAO_EXECUTADO"
                         it.detalhe_t1 = msg
