@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Script para geração do Manual do Usuário em formato PDF via Playwright.
-Gera um documento com diagramação idêntica ao modelo institucional, com 3 páginas perfeitas.
+Gera um documento objetivo, amigável e direto, focado exclusivamente na
+apresentação do projeto e no seu passo a passo de utilização em 3 páginas A4.
 """
 
 from pathlib import Path
@@ -14,16 +15,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <style>
     @page {
         size: A4;
-        margin: 18mm 20mm 18mm 20mm;
+        margin: 14mm 18mm 14mm 18mm;
     }
     * {
         box-sizing: border-box;
     }
     body {
         font-family: "Calibri", "Segoe UI", Arial, sans-serif;
-        color: #262626;
-        line-height: 1.45;
-        font-size: 11pt;
+        color: #2D3748;
+        line-height: 1.38;
+        font-size: 10pt;
         margin: 0;
         padding: 0;
     }
@@ -32,25 +33,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         height: 100%;
         display: flex;
         flex-direction: column;
+        justify-content: flex-start;
     }
     .page:last-child {
         page-break-after: avoid;
     }
     .title-container {
         text-align: center;
-        margin-top: 10px;
-        margin-bottom: 22px;
+        margin-top: 4px;
+        margin-bottom: 16px;
     }
     h1.main-title {
         color: #1F4E78;
         font-size: 20pt;
         font-weight: bold;
         letter-spacing: 0.5px;
+        margin: 0 0 6px 0;
+    }
+    .subtitle {
+        color: #5A6A80;
+        font-size: 11pt;
+        font-weight: 500;
         margin: 0 0 10px 0;
     }
     hr.title-hr {
         border: 0;
-        border-top: 1px solid #D9D9D9;
+        border-top: 1.5px solid #CBD5E0;
         margin: 0 auto;
         width: 100%;
     }
@@ -58,86 +66,98 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         color: #1F4E78;
         font-size: 13pt;
         font-weight: bold;
-        margin-top: 16px;
+        margin-top: 14px;
         margin-bottom: 8px;
+        border-bottom: 1px solid #E2E8F0;
+        padding-bottom: 4px;
     }
     h3 {
-        color: #2F5597;
-        font-size: 11.5pt;
+        color: #2B5B84;
+        font-size: 11pt;
         font-weight: bold;
-        margin-top: 14px;
-        margin-bottom: 6px;
+        margin-top: 12px;
+        margin-bottom: 4px;
     }
     p {
         margin-top: 0;
-        margin-bottom: 8px;
+        margin-bottom: 7px;
         text-align: justify;
     }
     ul {
-        margin-top: 4px;
-        margin-bottom: 12px;
-        padding-left: 22px;
+        margin-top: 3px;
+        margin-bottom: 8px;
+        padding-left: 20px;
     }
     li {
-        margin-bottom: 4px;
+        margin-bottom: 3px;
     }
-    .file-action {
-        font-size: 11pt;
-        margin: 8px 0 12px 18px;
-        color: #111;
+    .action-badge {
+        display: inline-block;
+        background-color: #EBF3FA;
+        color: #1F4E78;
+        font-weight: bold;
+        font-size: 10pt;
+        padding: 3px 10px;
+        border-radius: 4px;
+        border: 1px solid #B0C8DE;
+        margin: 4px 0 6px 0;
     }
-    .callout {
-        background-color: #F2F5F9;
-        border-left: 4px solid #1F4E78;
-        padding: 10px 14px;
-        margin: 12px 0 14px 0;
-        border-radius: 2px;
-        font-size: 10.5pt;
+    .inline-note {
+        background-color: #F8FAFC;
+        border-left: 3.5px solid #1F4E78;
+        padding: 7px 12px;
+        margin: 5px 0 7px 0;
+        border-radius: 0 3px 3px 0;
+        font-size: 9.8pt;
+        color: #4A5568;
         line-height: 1.4;
     }
-    .callout strong {
+    .inline-note strong {
         color: #1F4E78;
     }
     table.data-table {
         width: 100%;
         border-collapse: collapse;
-        margin: 10px 0 6px 0;
+        margin: 8px 0 8px 0;
     }
     table.data-table th {
         background-color: #1F4E78;
         color: #FFFFFF;
         font-weight: bold;
         text-align: center;
-        padding: 8px 10px;
-        font-size: 10.5pt;
+        padding: 7px 10px;
+        font-size: 10pt;
         border: 1px solid #1F4E78;
     }
     table.data-table td {
-        border: 1px solid #B0C4DE;
-        padding: 10px 12px;
-        font-size: 10pt;
+        border: 1px solid #CBD5E0;
+        padding: 8px 10px;
+        font-size: 9.5pt;
         vertical-align: top;
         background-color: #FFFFFF;
     }
-    .footnote {
-        font-size: 9.5pt;
-        color: #555555;
-        margin-top: 4px;
-        margin-bottom: 10px;
-    }
-    .console-box {
-        background-color: #111111;
-        color: #F0F0F0;
-        font-family: "Consolas", "Courier New", monospace;
-        font-size: 10pt;
-        padding: 14px 18px;
+    .option-box {
+        background-color: #F8FAFC;
+        border: 1px solid #CBD5E0;
         border-radius: 4px;
-        margin: 10px 0 14px 0;
+        padding: 8px 12px;
+        margin: 5px 0 7px 0;
+        font-size: 9.8pt;
         line-height: 1.4;
-        box-shadow: inset 0 0 4px rgba(0,0,0,0.5);
     }
-    .console-line {
-        white-space: pre-wrap;
+    .option-box .opt-title {
+        font-weight: bold;
+        color: #1F4E78;
+        margin-bottom: 4px;
+    }
+    .page-footer {
+        margin-top: auto;
+        padding-top: 6px;
+        border-top: 1px solid #E2E8F0;
+        display: flex;
+        justify-content: space-between;
+        font-size: 8.5pt;
+        color: #718096;
     }
 </style>
 </head>
@@ -147,111 +167,136 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="page">
     <div class="title-container">
         <h1 class="main-title">ROBÔ SOCIETÁRIO – DET / GOV.BR</h1>
+        <div class="subtitle">Manual de Operação e Guia Prático para o Usuário Final</div>
         <hr class="title-hr">
     </div>
 
-    <h2>1. Apresentação e Objetivo do Sistema</h2>
-    <p>O Robô Societário foi desenvolvido para automatizar as consultas em lote no portal DET (Domicílio Eletrônico Trabalhista) do Ministério do Trabalho e Emprego (Gov.br).</p>
-    <p>A principais funções da ferramenta são:</p>
+    <h2>1. Apresentação e Objetivo do Sistema</h2> as consultas em lote no portal do Domicílio Eletrônico Trabalhista (DET / Gov.br), eliminando o trabalho manual de acessar cada empresa individualmente.</p>
+    
+    <p>O sistema realiza as seguintes funções de forma autônoma:</p>
     <ul>
-        <li>Verificação de notificações e avisos pendentes de leitura ou já recebidos;</li>
-        <li>Download automático de termos de notificação e anexos oficiais em formato PDF ou ZIP;</li>
-        <li>Captura de telas (prints) de todas as etapas;</li>
-        <li>Emissão de relatório em Excel contendo o status de cada CNPJ consultado.</li>
+        <liAcesso via Gov.br utilizando certificado digital com procuração eletrônica vinculada ao CNPJ da empresa consultada;</li>
+        <li>Verificação da Caixa Postal em busca de mensagens e avisos pendentes ou já lidos;</li>
+        <li>Localização de novas notificações e download automático dos termos e anexos oficiais (PDFs ou ZIPs);</li>
+        <li>Registro de capturas de tela (prints) de todas as etapas para auditoria e evidência jurídica;</li>
+        <li>Emissão de relatório geral consolidado em Excel com o status detalhado de cada empresa consultada.</li>
     </ul>
 
     <h2>2. Guia Passo a Passo de Utilização</h2>
-    <h3>Passo 1: Instalação dos Certificados Digitais na Máquina</h3>
-    <p>Instale os certificados digitais A1 no perfil de usuário ativo na máquina Windows.<br>
-    (Isso pode ser verificado pelo comando Windows + R no teclado -&gt; <strong>certmgr.msc</strong> -&gt; Pessoal -&gt; Certificados).</p>
-
-    <h3>Passo 2: Atualização dos Certificados no Excel (2 Cliques)</h3>
-    <p>Na primeira vez que você for executar o robô ou sempre que você instalar um novo certificado na máquina, é interessante dar 2 cliques no arquivo:</p>
     
-    <div class="file-action">👉 <strong>Atualizar_Certificados.bat</strong></div>
+    <h3>Passo 1: Instalação dos Certificados Digitais na Máquina</h3>
+    <p>Antes de iniciar as consultas, certifique-se de que os certificados digitais (modelo A1) necessários estejam devidamente instalados no seu perfil de usuário ativo no Windows. O robô reconhece e utiliza os certificados já presentes na máquina para realizar as autenticações de forma transparente.</p>
 
-    <p>Esse arquivo é um “script” que fará a varredura do Windows e atualizará a aba 'Certificados_Disponiveis' da planilha <strong>CNPJs.xlsx</strong> (localizada dentro da pasta <strong>PlanilhasBase</strong>) com os nomes, números de documento e datas de validade de cada certificado instalado na máquina. Isso evita de ter que pegar os nomes dos certificados manualmente e traz exatamente o nome que o robô espera na aba “Nome Completo (certmgr)”.</p>
+    <h3>Passo 2: Atualização dos Certificados na Planilha (Atualizar_Certificados.bat)</h3>
+    <p>Na primeira vez que você for usar o sistema, ou sempre que instalar um novo certificado digital no computador, basta dar dois cliques no arquivo utilitário:</p>
+    
+    <div>👉 <span class="action-badge">Atualizar_Certificados.bat</span></div>
 
-    <p>Depois de executar, clique “Enter” ou apenas feche a janela “preta” (console) que abriu durante a execução.</p>
+    <p>Em poucos segundos, esse assistente fará a varredura do Windows e preencherá automaticamente a 2ª aba (<strong>Certificados_Disponiveis</strong>) da planilha <strong>CNPJs.xlsx</strong> (localizada dentro da pasta <strong>PlanilhasBase</strong>). Ele cataloga todos os certificados ativos, trazendo a Razão Social, o número do documento e a data de validade de cada um.</p>
 
-    <div class="callout">
-        <strong>📌 AVISO DE ARQUIVO FECHADO:</strong> Certifique-se de que a planilha CNPJs.xlsx (dentro da pasta <strong>PlanilhasBase</strong>) não esteja aberta no Excel durante esse clique. O Windows impede alterações em arquivos que já estejam abertos por outro programa.
+    <div class="inline-note">
+        <strong>💡 Observação de Uso:</strong> Para que o assistente consiga salvar as informações sem impedimentos do Windows, certifique-se de que o arquivo <em>CNPJs.xlsx</em> não esteja aberto no Excel durante esse clique rápido.
+    </div>
+
+    <div class="page-footer">
+        <span>Robô Societário – DET / Gov.br</span>
+        <span>Página 1 de 3</span>
     </div>
 </div>
 
 <!-- PÁGINA 2 -->
 <div class="page">
-    <h3>Passo 3: Preenchimento da Planilha CNPJs.xlsx</h3>
-    <p>Abra o arquivo <strong>CNPJs.xlsx</strong> localizado dentro da pasta <strong>PlanilhasBase</strong> no Microsoft Excel. A planilha possui duas abas planejadas para facilitar o trabalho:</p>
-
-    <p><strong>1. Aba 'Certificados_Disponiveis' (Apenas Consulta):</strong><br>
-    Exibe todos os certificados instalados na sua máquina, é o resultado da execução do Passo 2.</p>
-
-    <p><strong>2. Aba ‘CNPJs_consultados’ (Preenchimento das Consultas):</strong><br>
-    É aqui onde você informa quais empresas serão consultadas pelo robô, nesse padrão:</p>
+    <h3>Passo 3: Preenchimento da Planilha de Consultas (CNPJs.xlsx)</h3>
+    <p>Agora que os certificados foram coletados na etapa anterior, abra a planilha <strong>CNPJs.xlsx</strong> localizada dentro da pasta <strong>PlanilhasBase</strong> no Excel. O preenchimento conecta diretamente o que foi gerado no Passo 2 com as empresas que você quer consultar:</p>
+    
+    <ul>
+        <li><strong>Aba 'Certificados_Disponiveis' (Resultado do Passo 2):</strong> Mostra a lista de todos os certificados encontrados na sua máquina. Você usará essa aba como fonte de consulta para saber exatamente como o certificado está identificado.</li>
+        <li><strong>Aba 'CNPJs_consultados' (Onde você preenche as empresas):</strong> É aqui onde você informa quais empresas serão consultadas pelo robô, seguindo este formato simples:</li>
+    </ul>
 
     <table class="data-table">
         <thead>
             <tr>
-                <th style="width: 48%;">CNPJ</th>
-                <th style="width: 52%;">Certificado (ao qual o CNPJ pertence)</th>
+                <th style="width: 44%;">Coluna A: CNPJ</th>
+                <th style="width: 56%;">Coluna B: Certificado</th>
             </tr>
         </thead>
         <tbody>
             <tr>
-                <td>Digite os 14 dígitos do CNPJ da empresa a ser consultada (ex: 39407892000185).</td>
-                <td>Digite o Nome Completo (certmgr) do certificado procurador.</td>
+                <td>Digite os 14 dígitos do CNPJ da empresa que deseja consultar (exemplo: <code>39407892000185</code>).</td>
+                <td>Copie e cole o nome exatamente como aparece na aba <em>Certificados_Disponiveis</em>.</td>
             </tr>
         </tbody>
     </table>
 
-    <p class="footnote">** A planilha estará preenchida com alguns CNPJs na primeira vez que abri-la. Eles servem apenas como exemplo e podem ser deletados a qualquer momento desejado.</p>
-
-    <div class="callout">
-        <strong>📌 FACILIDADE DE PREENCHIMENTO:</strong> Para evitar preencher o nome do certificado com valores que o robô não aceite, é interessante copiar (ctrl + c) os nomes presentes na aba ‘Certificados_Disponiveis’ e colar diretamente na coluna de certificado da aba ‘CNPJs_consultados’.
+    <div class="inline-note">
+        <strong>💡 Conexão entre as Abas:</strong> Para que o robô localize o certificado correto sem erros de digitação, vá até a aba <em>Certificados_Disponiveis</em>, copie (Ctrl+C) o nome do certificado desejado e cole (Ctrl+V) na Coluna B da aba <em>CNPJs_consultados</em>. Após preencher e conferir a lista, salve o arquivo e feche o Excel.
     </div>
 
-    <p><em>Importante: Após preencher e conferir a lista, salve o arquivo e feche o Excel antes de prosseguir.</em></p>
-
     <h3>Passo 4: Executando a Automação (RoboSocietario.exe)</h3>
-    <p>Para iniciar as consultas, dê dois cliques diretamente no executável:</p>
+    <p>Com a planilha preenchida e fechada, basta dar dois cliques no aplicativo principal para iniciar as consultas:</p>
 
-    <div class="file-action">👉 <strong>RoboSocietario.exe</strong></div>
+    <div>👉 <span class="action-badge">RoboSocietario.exe</span></div>
 
-    <p>Na primeira execução, o sistema abrirá uma janela preta (Console), inicializará o Google Chrome e fará todo o processo principal automaticamente (abrir site do DET, acessar certificados, CNPJs, tirar prints…).</p>
+    <p>O robô inicializará o Google Chrome automaticamente e executará as consultas empresa por empresa. Uma janela de texto preta (Console) acompanhará a execução em tempo real, informando o percentual de avanço, o CNPJ em atendimento e cada ação realizada.</p>
 
-    <p>Devido a instabilidades no site do DET, alguns CNPJs podem falhar. Pensando nisso, caso algum CNPJ fique pendente, ele será registrado em uma nova planilha dentro de <strong>PlanilhasBase</strong>: “<strong>CNPJs_pendentes.xlsx</strong>”.</p>
+    <div class="inline-note">
+        <strong>💡 Movimentação do Mouse:</strong> Durante os primeiros instantes em que a janela do Windows surge na tela para confirmar o certificado digital, evite mexer no mouse ou no teclado para que o robô realize a seleção física com total precisão.
+    </div>
+
+    <p><strong>Gerenciamento de Instabilidades do Portal:</strong> Os portais do governo frequentemente passam por oscilações temporárias de conexão. Pensando nisso, o robô possui mecanismos de proteção automáticos:</p>
+    <ul>
+        <li><strong>Planilha de pendências (CNPJs_Pendentes.xlsx):</strong> Se alguma empresa não responder (ou se exigir validação por celular / 2FA) durante a execução do robô, ela é registrada automaticamente em <em>PlanilhasBase/CNPJs_Pendentes.xlsx</em>.</li>
+    </ul>
+
+    <p>Caso existam pendências de uma execução anterior, ao abrir o <strong>RoboSocietario.exe</strong> você poderá escolher de forma simples:</p>
+
+    <div class="option-box">
+        <div class="opt-title">Opções de Execução Disponíveis:</div>
+        <div>• <strong>[Opção 1 - ENTER]:</strong> Executar a base completa cadastrada na planilha principal (<em>PlanilhasBase/CNPJs.xlsx</em>).</div>
+        <div>• <strong>[Opção 2]:</strong> Reprocessar apenas as empresas que ficaram pendentes (<em>PlanilhasBase/CNPJs_Pendentes.xlsx</em>).</div>
+    </div>
+
+    <p>Assim que todas as empresas pendentes forem concluídas com sucesso, a planilha de pendências é excluída automaticamente pelo robô.</p>
+
+    <div class="page-footer">
+        <span>Robô Societário – DET / Gov.br</span>
+        <span>Página 2 de 3</span>
+    </div>
 </div>
 
 <!-- PÁGINA 3 -->
 <div class="page">
-    <p>Se isso acontecer, ao dar dois cliques em RoboSocietario.exe, ele abrirá essa tela:</p>
-
-    <div class="console-box">
-        <div class="console-line">[AVISO] Identificada planilha com itens pendentes da execução anterior:</div>
-        <div class="console-line">   [1] Executar base completa (PlanilhasBase/CNPJs.xlsx)</div>
-        <div class="console-line">   [2] Reprocessar apenas pendentes anteriores (PlanilhasBase/CNPJs_Pendentes.xlsx)</div>
-        <br>
-        <div class="console-line">Digite a opção [Pressione ENTER para opção 1]:</div>
-    </div>
-
-    <p>Basta escolher se deseja executar todo o processo novamente, ou apenas o que ficou pendente.</p>
-    <ul>
-        <li><strong>Limpeza Automática:</strong> Quando todos os CNPJs forem concluídos com êxito, a planilha de pendências é excluída automaticamente.</li>
-    </ul>
-
     <h3>Passo 5: Conferência dos Resultados e Evidências</h3>
-    <p>Ao finalizar a execução, o robô exibirá uma mensagem de conclusão e aguardará você pressionar ENTER. Você poderá conferir os resultados nos seguintes locais:</p>
+    <p>Ao finalizar o processamento de todos os itens, o robô exibirá uma mensagem de conclusão na tela e aguardará você pressionar ENTER para fechar a janela. Todos os resultados e evidências ficam organizados dentro da pasta <strong>Resultados</strong>:</p>
 
     <p><strong>1. Pasta 'Resultados/Relatorios':</strong><br>
-    Contém a planilha Relatorio_Execucao_&lt;Data_Hora&gt;.xlsx com o consolidado de todas as consultas, indicando se houve notificações, se havia anexos, quantidade de mensagens e links diretos para os prints.</p>
+    Contém a planilha consolidada em Excel gerada a cada execução, identificada com data e hora (exemplo: <em>Relatorio_Execucao_2026-10-30_09-00-00.xlsx</em>). Essa planilha traz o resumo completo de cada empresa consultada, indicando se foram encontradas mensagens na Caixa Postal, se havia novas notificações trabalhistas, quantidade de anexos e links diretos para a pasta das imagens.</p>
 
     <p><strong>2. Pasta 'Resultados/CapturasDeTela-Downloads':</strong><br>
-    Organizada por data e hora da execução, contendo uma subpasta dedicada para cada CNPJ com todos os prints comprobatórios e arquivos de anexos (PDFs/ZIPs) baixados.</p>
+    Armazena o dossiê completo de auditoria organizado cronologicamente por data e hora da execução, agrupado por certificado digital e com uma subpasta individual para cada CNPJ consultado. Dentro de cada pasta ficam salvos:</p>
+    <ul>
+        <li>Capturas de tela (prints) em alta resolução da Caixa Postal (antes e após a aplicação de filtros de não lidas);</li>
+        <li>Capturas de tela das notificações oficiais com data e hora visíveis;</li>
+        <li>Arquivos de termos de notificação e documentos anexos baixados em formato oficial (PDFs ou ZIPs).</li>
+    </ul>
 
-    <h2>3. Guia de Funcionamento agendado (Sexta-feira, 8:00)</h2>
-    <p><strong>1.</strong> O robô será executado toda sexta feira às 8:00 da manhã, automaticamente tirando prints e fazendo download dos arquivos depois da planilha “CNPJs.xlsx” em <strong>PlanilhasBase</strong> ser configurada.</p>
-    <p><strong>2.</strong> A possibilidade de realizar a execução manualmente existe caso o site apresente instabilidade durante o horário da execução e não consiga finalizar com sucesso a consulta aos CNPJs. Dessa forma, o responsável pode executar o processo para todos os CNPJs ou somente para os CNPJs que ficaram pendentes a qualquer momento.</p>
+    <div class="inline-note">
+        <strong>💡 Verificação em Duas Etapas (2FA):</strong> Caso a conta Gov.br de uma empresa solicite confirmação de identidade no aplicativo do celular, o robô salva um print da tela como comprovante e guarda a empresa na planilha de pendências, prosseguindo com as demais empresas da lista sem travar a rotina.
+    </div>
+
+    <p><strong>Rotina Automática Agendada (Sexta-feira às 08:00):</strong><br>
+    O Robô Societário também será configurado para operar de forma 100% autônoma toda sexta-feira às 08:00 através do Agendador de Tarefas do Windows. Nessa rotina agendada, o funcionamento é totalmente silencioso:</p>
+    <ul>
+        <li>A equipe só precisa manter a planilha <em>PlanilhasBase/CNPJs.xlsx</em> preenchida previamente com as empresas e certificados da semana;</li>
+        <li>Pontualmente às 08:00, o robô inicia sozinho, realiza todas as consultas em lote, grava os downloads e capturas, e encerra o processo sem exigir nenhuma confirmação manual;</li>
+        <li>Basta abrir a pasta <em>Resultados/Relatorios</em> para conferir o relatório consolidado pronto com os resultados da semana.</li>
+    </ul>
+
+    <div class="page-footer">
+        <span>Robô Societário – DET / Gov.br</span>
+        <span>Página 3 de 3</span>
+    </div>
 </div>
 
 </body>
@@ -269,10 +314,10 @@ def gerar_pdf(caminho_saida: Path):
             format="A4",
             print_background=True,
             margin={
-                "top": "15mm",
-                "bottom": "15mm",
-                "left": "18mm",
-                "right": "18mm",
+                "top": "0mm",
+                "bottom": "0mm",
+                "left": "0mm",
+                "right": "0mm",
             },
         )
         browser.close()
