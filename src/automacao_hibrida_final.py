@@ -206,7 +206,7 @@ def matar_processos_chrome_automacao():
 def liberar_porta_se_ocupada():
     """Fecha processos órfãos na porta CDP para garantir uma inicialização limpa."""
     if porta_em_uso(CDP_PORT):
-        logger.info(f"Porta {CDP_PORT} em uso. Encerrando processos anteriores da automação...")
+        logger.info(f"[SISTEMA] Porta {CDP_PORT} em uso. Encerrando processos anteriores do Chrome...")
         matar_processos_chrome_automacao()
         time.sleep(1)
 
@@ -622,7 +622,7 @@ def clicar_botao_certificado_garantido(timeout_segundos: int = 30) -> bool:
         time.sleep(0.8)
 
     # Se falhar, salva captura para diagnóstico
-    logger.warning(f"'Seu certificado digital' não foi localizado em {timeout_segundos}s.")
+    logger.warning(f"[FASE 1 - SO] 'Seu certificado digital' não foi localizado em {timeout_segundos}s.")
     try:
         pyautogui.screenshot(str(IMG_DEBUG_ERRO))
         logger.info(f"[DIAGNÓSTICO] Screenshot da tela salvo em: {IMG_DEBUG_ERRO.name}")
@@ -925,7 +925,7 @@ def limpar_ou_criar_pasta(caminho: Path):
                 elif item.is_dir():
                     shutil.rmtree(item)
             except Exception as e:
-                logger.warning(f"Não foi possível limpar {item}: {e}")
+                logger.warning(f"[LIMPEZA] Não foi possível limpar {item}: {e}")
 
 
 def remover_pastas_vazias_do_item(pasta_item: Path):
@@ -1023,12 +1023,11 @@ def executar_rotatividade_antigos(pasta: Path, eh_pasta: bool, min_itens: int = 
 
 
 def exibir_alerta_planilha_inexistente(caminho_criado: Path):
-    mensagem = (
-        "A Planilha de referência para consulta de CNPJs não existia.\n"
-        f"A planilha modelo foi criada automaticamente no caminho:\n{caminho_criado}\n"
-        "Por favor, preencha com os CNPJs na coluna 'CNPJ' e o certificado na coluna 'Certificado', e execute o robô novamente."
-    )
-    logger.warning(mensagem)
+    logger.warning("=" * 70)
+    logger.warning("[PLANILHA] A Planilha de referência para consulta de CNPJs não existia.")
+    logger.warning(f"[PLANILHA] A planilha modelo foi criada automaticamente no caminho: {caminho_criado}")
+    logger.warning("[PLANILHA] Por favor, preencha com os CNPJs na coluna 'CNPJ' e o certificado na coluna 'Certificado', e execute o robô novamente.")
+    logger.warning("=" * 70)
 
 
 def efetuar_logout_det(page):
@@ -1039,7 +1038,7 @@ def efetuar_logout_det(page):
         if page.is_closed():
             return
         time.sleep(DELAY_ENTRE_ACOES_S)
-        logger.info("Efetuando logout no sistema DET...")
+        logger.info("[LOGOUT] Efetuando logout no sistema DET...")
 
         btn_sair = page.locator("br-button:has-text('Sair'), button:has-text('Sair'), a:has-text('Sair')").first
         if not btn_sair.is_visible():
@@ -1048,7 +1047,7 @@ def efetuar_logout_det(page):
         if btn_sair.is_visible():
             time.sleep(DELAY_ENTRE_ACOES_S)
             btn_sair.click()
-            logger.info("Clique no botão 'Sair' realizado.")
+            logger.info("[LOGOUT] Clique no botão 'Sair' realizado.")
             time.sleep(DELAY_ENTRE_ACOES_S)
 
             btn_confirmar = page.locator("button:has-text('Sim'), button:has-text('Confirmar'), br-button:has-text('Sim')").first
@@ -1061,9 +1060,9 @@ def efetuar_logout_det(page):
 
             time.sleep(1.5)
         else:
-            logger.info("Botão 'Sair' não localizado no cabeçalho.")
+            logger.info("[LOGOUT] Botão 'Sair' não localizado no cabeçalho.")
     except Exception as e:
-        logger.warning(f"Aviso durante tentativa de logout: {e}")
+        logger.warning(f"[LOGOUT] Aviso durante tentativa de logout: {e}")
 
 
 def processar_item_det(
@@ -1137,7 +1136,7 @@ def processar_item_det(
             time.sleep(DELAY_ENTRE_ACOES_S)
             page.locator("button:has-text('Cancelar')").first.click()
             time.sleep(DELAY_ENTRE_ACOES_S)
-            logger.warning(f"CNPJ recusado pelo DET, item ignorado: {item_id}")
+            logger.warning(f"[{item_id}] [VALIDAÇÃO] CNPJ recusado pelo DET, item ignorado.")
             if progress_callback:
                 progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} inválido no DET")
             return False, "CNPJ_RECUSADO_DET", "DET indicou CNPJ inválido"
@@ -1148,7 +1147,7 @@ def processar_item_det(
             time.sleep(DELAY_ENTRE_ACOES_S)
             page.locator("button:has-text('Cancelar')").first.click()
             time.sleep(DELAY_ENTRE_ACOES_S)
-            logger.warning(f"Sem procuração ou vínculo no DET para o CNPJ: {item_id}")
+            logger.warning(f"[{item_id}] [VALIDAÇÃO] Sem procuração ou vínculo no DET para o CNPJ.")
             if progress_callback:
                 progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} sem procuração")
             return False, "SEM_PROCURACAO", "Não foi encontrado procurador/vínculo no DET"
@@ -1276,7 +1275,7 @@ def processar_item_det(
                     except PlaywrightTimeoutError:
                         tem_msg_nao_lida = False
         except Exception as e:
-            logger.warning(f"Erro ao verificar mensagens não lidas: {e}")
+            logger.warning(f"[{item_id}] [CAIXA POSTAL] Erro ao verificar mensagens não lidas: {e}")
             tem_msg_nao_lida = False
 
         # Tira SEMPRE o print após o filtro (mostrando apenas não lidas ou comprovando que não há nenhuma)
@@ -1710,12 +1709,12 @@ def processar_item_det(
         qtd_arquivos = sum(1 for f in arquivos_guardados if f.is_file())
 
         logger.info(
-            f"SUCESSO: O item '{item_id}' foi verificado. Arquivos guardados (prints + downloads): {qtd_arquivos}"
+            f"[{item_id}] [CONCLUÍDO] Sucesso na verificação. Arquivos guardados (prints + downloads): {qtd_arquivos}"
         )
         return True, "SUCESSO", f"{qtd_arquivos} arquivo(s) guardado(s)"
 
     except Exception as e:
-        logger.error(f"Erro no item '{item_id}' na etapa '{etapa}': {e}")
+        logger.error(f"[{item_id}] [{etapa}] Falha crítica: {e}")
         try:
             page.goto(URL_SERVICOS, timeout=60000)
         except Exception:
@@ -1753,7 +1752,7 @@ def processar_item_det_com_retry(
     if not sucesso and status_code == "FALHA_SISTEMA":
         if stop_event and stop_event.is_set():
             return sucesso, status_code, detalhe
-        logger.warning(f"Tentando reprocessamento imediato (1 retry) do CNPJ '{item_id}'...")
+        logger.warning(f"[{item_id}] [RETRY] Tentando reprocessamento imediato (1 retry) do CNPJ...")
         try:
             page.goto(URL_SERVICOS, timeout=45000)
             time.sleep(2)
@@ -1961,12 +1960,14 @@ def registrar_pulo_2fa(
     Salva screenshot comprobatório na pasta do certificado, preenche os itens como
     'Necessita confirmação de identidade' e grava imediatamente nos relatórios e pendentes.
     """
-    logger.warning("\n" + "=" * 80)
+    logger.warning("=" * 80)
     logger.warning(
-        f"[VERIFICAÇÃO EM DUAS ETAPAS] O certificado '{nome_cert_exibicao}' exibiu tela de Verificação em duas etapas no Gov.br.\n"
-        f"Fechando o navegador e pulando todos os {len(lista_cnpjs)} CNPJ(s) associados a este certificado."
+        f"[2FA] O certificado '{nome_cert_exibicao}' exibiu tela de Verificação em duas etapas no Gov.br."
     )
-    logger.warning("=" * 80 + "\n")
+    logger.warning(
+        f"[2FA] Fechando o navegador e pulando todos os {len(lista_cnpjs)} CNPJ(s) associados a este certificado."
+    )
+    logger.warning("=" * 80)
 
     pasta_cert.mkdir(parents=True, exist_ok=True)
     caminho_print_2fa = pasta_cert / "01_necessita_confirmacao_identidade_2fa.png"
@@ -1991,7 +1992,7 @@ def registrar_pulo_2fa(
             salvo = True
         logger.info(f"[COMPROVANTE] Screenshot da tela de 2FA salvo na pasta do certificado: {caminho_print_2fa.name}")
     except Exception as e_shot:
-        logger.warning(f"Não foi possível salvar screenshot de 2FA: {e_shot}")
+        logger.warning(f"[COMPROVANTE] Não foi possível salvar screenshot de 2FA: {e_shot}")
 
     for doc in lista_cnpjs:
         it = mapa_itens[doc]
@@ -2054,10 +2055,12 @@ def processar_sessao_certificado(
     nome_cert_exibicao = cert_alvo if cert_alvo else "Padrão"
     pasta_cert = screenshots_dir / sanitizar_nome_pasta(cert_alvo)
     pasta_cert.mkdir(parents=True, exist_ok=True)
+    logger.info("=" * 60)
     logger.info(
-        f"\n{'='*60}\n>>> INICIANDO GRUPO {num_grupo}/{total_grupos} (Rodada {rodada}): "
-        f"Certificado '{nome_cert_exibicao}' ({len(lista_cnpjs)} CNPJs)\n{'='*60}"
+        f"[GRUPO {num_grupo}/{total_grupos}] [RODADA {rodada}] "
+        f"Certificado: '{nome_cert_exibicao}' ({len(lista_cnpjs)} CNPJ(s))"
     )
+    logger.info("=" * 60)
 
     playwright_mgr = None
     browser = None
@@ -2087,7 +2090,7 @@ def processar_sessao_certificado(
                     break
 
                 logger.info(
-                    f"\n>>> Conexão ao Portal (Tentativa {tentativa_portal}/{MAX_TENTATIVAS_PORTAL} | "
+                    f"[LOGIN] Conexão ao Portal (Tentativa {tentativa_portal}/{MAX_TENTATIVAS_PORTAL} | "
                     f"Captcha {tentativa_captcha}/{MAX_TENTATIVAS_CAPTCHA}): "
                     f"Abertura do Chrome e Login gov.br para '{nome_cert_exibicao}'..."
                 )
@@ -2114,7 +2117,7 @@ def processar_sessao_certificado(
                         break
 
                     if not clicar_botao_govbr_garantido(timeout_segundos=25):
-                        logger.warning("Não foi possível localizar o botão 'Entrar com gov.br'.")
+                        logger.warning("[LOGIN] Não foi possível localizar o botão 'Entrar com gov.br'.")
                         falha_portal = True
                         motivo_falha_portal = "Botão 'Entrar com gov.br' não encontrado"
                         break
@@ -2123,7 +2126,7 @@ def processar_sessao_certificado(
                         break
 
                     if not clicar_botao_certificado_garantido(timeout_segundos=30):
-                        logger.warning("Não foi possível localizar 'Seu certificado digital'.")
+                        logger.warning("[LOGIN] Não foi possível localizar 'Seu certificado digital'.")
                         falha_portal = True
                         motivo_falha_portal = "Opção 'Seu certificado digital' não encontrada"
                         break
@@ -2135,7 +2138,7 @@ def processar_sessao_certificado(
                     sucesso_cert = selecionar_e_confirmar_certificado(termo_busca=cert_alvo, timeout_segundos=25)
                     if not sucesso_cert:
                         logger.error(
-                            f"\n[ATENÇÃO] O certificado '{nome_cert_exibicao}' NÃO foi localizado ou não está instalado no Windows. "
+                            f"[CERTIFICADOS] O certificado '{nome_cert_exibicao}' NÃO foi localizado ou não está instalado no Windows. "
                             f"Todos os {len(lista_cnpjs)} CNPJ(s) associados a este grupo foram ignorados."
                         )
                         for doc in lista_cnpjs:
@@ -2183,9 +2186,9 @@ def processar_sessao_certificado(
                     return False
 
                 except CaptchaDetectadoException as e_cap:
+                    logger.warning(f"[CAPTCHA] {e_cap}")
                     logger.warning(
-                        f"\n[CAPTCHA DETECTADO] {e_cap}\n"
-                        f"Fechando o navegador e tentando novamente (tentativa {tentativa_captcha}/{MAX_TENTATIVAS_CAPTCHA})..."
+                        f"[CAPTCHA] Fechando o navegador e tentando novamente (tentativa {tentativa_captcha}/{MAX_TENTATIVAS_CAPTCHA})..."
                     )
                     fechar_navegador(browser, context, page)
                     time.sleep(3)
@@ -2209,11 +2212,11 @@ def processar_sessao_certificado(
                 page = None
 
                 if tentativa_portal < MAX_TENTATIVAS_PORTAL:
-                    logger.warning("\n" + "=" * 80)
-                    logger.warning("[ATENÇÃO - NÃO MEXA NO COMPUTADOR]")
-                    logger.warning(f"O portal gov.br apresentou instabilidade: {motivo_falha_portal}.")
-                    logger.warning(f"O navegador será reiniciado e aguardará 60 segundos antes da tentativa {tentativa_portal + 1}/{MAX_TENTATIVAS_PORTAL}.")
-                    logger.warning("=" * 80 + "\n")
+                    logger.warning("=" * 80)
+                    logger.warning("[INSTABILIDADE] [ATENÇÃO - NÃO MEXA NO COMPUTADOR]")
+                    logger.warning(f"[INSTABILIDADE] O portal gov.br apresentou instabilidade: {motivo_falha_portal}.")
+                    logger.warning(f"[INSTABILIDADE] O navegador será reiniciado e aguardará 60 segundos antes da tentativa {tentativa_portal + 1}/{MAX_TENTATIVAS_PORTAL}.")
+                    logger.warning("=" * 80)
 
                     for seg_restantes in range(60, 0, -10):
                         if stop_event and stop_event.is_set():
@@ -2259,7 +2262,7 @@ def processar_sessao_certificado(
                     return False
 
             # Conecta o Playwright via CDP para validar a chegada ao DET
-            logger.info(f"Certificado '{nome_cert_exibicao}' autenticado no Windows. Conectando Playwright para validar chegada ao DET...")
+            logger.info(f"[LOGIN] Certificado '{nome_cert_exibicao}' autenticado no Windows. Conectando Playwright para validar chegada ao DET...")
             playwright_mgr = sync_playwright().start()
 
             for tentativa_cdp in range(1, 6):
@@ -2275,7 +2278,7 @@ def processar_sessao_certificado(
                     time.sleep(2)
 
             if not browser:
-                logger.warning(f"Não foi possível conectar o Playwright via CDP na tentativa {tentativa_portal}/{MAX_TENTATIVAS_PORTAL}.")
+                logger.warning(f"[LOGIN] Não foi possível conectar o Playwright via CDP na tentativa {tentativa_portal}/{MAX_TENTATIVAS_PORTAL}.")
                 falha_portal = True
                 motivo_falha_portal = "Falha de conexão CDP do Playwright"
             else:
@@ -2287,7 +2290,7 @@ def processar_sessao_certificado(
                 tela_2fa_detectada = False
                 pagina_2fa = None
 
-                logger.info(f"Aguardando autenticação e carregamento do portal DET para '{nome_cert_exibicao}'...")
+                logger.info(f"[LOGIN] Aguardando autenticação e carregamento do portal DET para '{nome_cert_exibicao}'...")
 
                 while time.time() - inicio_espera < timeout_login:
                     if stop_event and stop_event.is_set():
@@ -2376,14 +2379,14 @@ def processar_sessao_certificado(
 
                 if not sessao_estabelecida and not falha_portal:
                     logger.warning(
-                        f"Tempo limite esgotado ({timeout_login}s) aguardando chegada ao DET "
+                        f"[DET TIMEOUT] Tempo limite esgotado ({timeout_login}s) aguardando chegada ao DET "
                         f"(tentativa {tentativa_portal}/{MAX_TENTATIVAS_PORTAL})."
                     )
                     falha_portal = True
                     motivo_falha_portal = "Tempo limite esgotado aguardando carregamento do portal DET"
 
             if sessao_estabelecida:
-                logger.info(f"Sessão ativa estabelecida com sucesso no portal DET para certificado '{nome_cert_exibicao}'!")
+                logger.info(f"[LOGIN] Sessão ativa estabelecida com sucesso no portal DET para certificado '{nome_cert_exibicao}'!")
                 break
 
             # Se falhou nesta tentativa de portal:
@@ -2399,11 +2402,11 @@ def processar_sessao_certificado(
             page = None
 
             if tentativa_portal < MAX_TENTATIVAS_PORTAL:
-                logger.warning("\n" + "=" * 80)
-                logger.warning("[ATENÇÃO - NÃO MEXA NO COMPUTADOR]")
-                logger.warning(f"O portal DET / gov.br apresentou instabilidade: {motivo_falha_portal}.")
-                logger.warning(f"O navegador será reiniciado e aguardará 60 segundos antes da tentativa {tentativa_portal + 1}/{MAX_TENTATIVAS_PORTAL}.")
-                logger.warning("=" * 80 + "\n")
+                logger.warning("=" * 80)
+                logger.warning("[INSTABILIDADE] [ATENÇÃO - NÃO MEXA NO COMPUTADOR]")
+                logger.warning(f"[INSTABILIDADE] O portal DET / gov.br apresentou instabilidade: {motivo_falha_portal}.")
+                logger.warning(f"[INSTABILIDADE] O navegador será reiniciado e aguardará 60 segundos antes da tentativa {tentativa_portal + 1}/{MAX_TENTATIVAS_PORTAL}.")
+                logger.warning("=" * 80)
 
                 for seg_restantes in range(60, 0, -10):
                     if stop_event and stop_event.is_set():
@@ -2456,7 +2459,7 @@ def processar_sessao_certificado(
             return False
 
         time.sleep(DELAY_ENTRE_ACOES_S)
-        logger.info(f"Fase 2 estabelecida: Sessão ativa para certificado '{nome_cert_exibicao}'!")
+        logger.info(f"[LOGIN] Sessão confirmada: Pronto para processamento de CNPJs do certificado '{nome_cert_exibicao}'!")
 
         # ==================================================================
         # FASE 3: Loop de CNPJs deste certificado
@@ -2466,12 +2469,12 @@ def processar_sessao_certificado(
 
         for current_item in lista_cnpjs:
             if stop_event and stop_event.is_set():
-                logger.warning("Execução cancelada pelo usuário.")
+                logger.warning("[CONTROLE] Execução cancelada pelo usuário.")
                 break
 
             if falhas_seguidas >= 3:
                 logger.error(
-                    f"3 falhas seguidas no grupo '{nome_cert_exibicao}'. Interrompendo itens restantes deste certificado."
+                    f"[GRUPO] 3 falhas seguidas no grupo '{nome_cert_exibicao}'. Interrompendo itens restantes deste certificado."
                 )
                 break
 
@@ -2534,7 +2537,7 @@ def processar_sessao_certificado(
         return True
 
     except Exception as e_grupo:
-        logger.error(f"Erro no processamento do grupo de certificado '{nome_cert_exibicao}': {e_grupo}")
+        logger.error(f"[GRUPO] Erro no processamento do grupo de certificado '{nome_cert_exibicao}': {e_grupo}")
         return False
 
     finally:
@@ -2542,7 +2545,7 @@ def processar_sessao_certificado(
         if page and not page.is_closed():
             efetuar_logout_det(page)
 
-        logger.info(f"Fechando sessão do Chrome para certificado '{nome_cert_exibicao}'...")
+        logger.info(f"[LOGOUT] Fechando sessão do Chrome para certificado '{nome_cert_exibicao}'...")
         fechar_navegador(browser, context, page)
         if playwright_mgr:
             try:
@@ -2610,9 +2613,9 @@ def executar_robo_hibrido(
     # 1. Verificação da Planilha de Entrada (se não existir, é criada automaticamente se for a padrão)
     if not excel_path.exists():
         if planilha_especifica:
-            logger.info(f"A planilha '{excel_path.name}' não foi encontrada em '{base_dir}'. Não há itens pendentes a processar.")
+            logger.info(f"[PLANILHA] A planilha '{excel_path.name}' não foi encontrada em '{base_dir}'. Não há itens pendentes a processar.")
             return True
-        logger.error(f"Planilha de CNPJs não encontrada em: {excel_path}")
+        logger.error(f"[PLANILHA] Planilha de CNPJs não encontrada em: {excel_path}")
         try:
             base_dir.mkdir(parents=True, exist_ok=True)
             wb = openpyxl.Workbook()
@@ -2634,9 +2637,9 @@ def executar_robo_hibrido(
             ws.column_dimensions["B"].width = 65
             wb.save(str(excel_path))
             wb.close()
-            logger.info(f"Planilha modelo criada automaticamente com sucesso em: {excel_path}")
+            logger.info(f"[PLANILHA] Planilha modelo criada automaticamente com sucesso em: {excel_path}")
         except Exception as e:
-            logger.error(f"Falha ao criar planilha modelo: {e}")
+            logger.error(f"[PLANILHA] Falha ao criar planilha modelo: {e}")
         exibir_alerta_planilha_inexistente(excel_path)
         return False
 
@@ -2659,7 +2662,7 @@ def executar_robo_hibrido(
                 linhas_lidas.append((col_a, col_b))
         wb.close()
     except Exception as e:
-        logger.error(f"Erro ao ler a planilha {excel_path}: {e}")
+        logger.error(f"[PLANILHA] Erro ao ler a planilha {excel_path}: {e}")
         return False
 
     # Filtra cabeçalhos conhecidos
@@ -2674,7 +2677,7 @@ def executar_robo_hibrido(
 
     if not dados_filtrados:
         logger.warning(
-            f"A planilha em '{excel_path}' não contém CNPJs para processar. Preencha e inicie novamente."
+            f"[PLANILHA] A planilha em '{excel_path}' não contém CNPJs para processar. Preencha e inicie novamente."
         )
         return False
 
@@ -2694,14 +2697,14 @@ def executar_robo_hibrido(
     total_grupos = len(grupos_certificados)
 
     logger.info(
-        f"Planilha carregada com sucesso. Total de CNPJs: {total_itens} "
+        f"[PLANILHA] Planilha carregada com sucesso. Total de CNPJs: {total_itens} "
         f"distribuídos em {total_grupos} grupo(s) de certificado."
     )
     if progress_callback:
         progress_callback(0, total_itens, f"Iniciando automação... (0/{total_itens})")
 
     limpar_ou_criar_pasta(screenshots_dir)
-    logger.info(f"Pasta de capturas desta execução: {screenshots_dir}")
+    logger.info(f"[DIRETÓRIO] Pasta de capturas desta execução: {screenshots_dir}")
 
     item_counter = [0]
 
@@ -2711,7 +2714,7 @@ def executar_robo_hibrido(
         # ==================================================================
         for num_grupo, (cert_alvo, lista_cnpjs) in enumerate(grupos_certificados.items(), start=1):
             if stop_event and stop_event.is_set():
-                logger.warning("Execução interrompida pelo usuário.")
+                logger.warning("[CONTROLE] Execução interrompida pelo usuário.")
                 break
 
             processar_sessao_certificado(
@@ -2736,10 +2739,10 @@ def executar_robo_hibrido(
         # ==================================================================
         itens_pendentes = [it for it in mapa_itens.values() if it.status_final in ("FALHA_SISTEMA", "NAO_EXECUTADO")]
         if itens_pendentes and not (stop_event and stop_event.is_set()):
-            logger.info("\n" + "=" * 80)
+            logger.info("=" * 80)
             logger.info(f"[RODADA 2 - REPROCESSAMENTO AUTOMÁTICO] {len(itens_pendentes)} CNPJ(s) pendente(s).")
-            logger.info("Executando segunda passada para recuperar itens com falha temporária...")
-            logger.info("=" * 80 + "\n")
+            logger.info("[RODADA 2 - REPROCESSAMENTO AUTOMÁTICO] Executando segunda passada para recuperar itens com falha temporária...")
+            logger.info("=" * 80)
 
             grupos_pendentes = defaultdict(list)
             for it in itens_pendentes:
@@ -2780,11 +2783,11 @@ def executar_robo_hibrido(
     itens_2fa = sum(1 for it in mapa_itens.values() if it.status_final == "EXIGE_2FA")
     itens_falha = total_itens - itens_sucesso
     if itens_falha == 0:
-        logger.info(f"Automação finalizada com sucesso total: {itens_sucesso}/{total_itens} CNPJ(s) processados com êxito.")
+        logger.info(f"[RESUMO] Automação finalizada com sucesso total: {itens_sucesso}/{total_itens} CNPJ(s) processados com êxito.")
         return True
     else:
         logger.warning(
-            f"Automação finalizada com pendências: {itens_sucesso} sucesso(s), "
+            f"[RESUMO] Automação finalizada com pendências: {itens_sucesso} sucesso(s), "
             f"{itens_2fa} bloqueado(s) por 2FA, "
             f"{itens_falha} pendência(s)/falha(s) de {total_itens} CNPJ(s)."
         )

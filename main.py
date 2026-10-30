@@ -26,14 +26,14 @@ from src.automacao_hibrida_final import executar_robo_hibrido
 from src.certificados import atualizar_aba_certificados_disponiveis
 
 
-def configurar_logger(pasta_base: Path) -> Path:
+def configurar_logger(pasta_base: Path, nome_prefixo: str = "log_execucao") -> Path:
     """Configura o logger 'RoboSocietario' para gravar no console e em arquivo .txt."""
     pasta_resultados = pasta_base / "Resultados"
     pasta_logs = pasta_resultados / "Logs"
     pasta_logs.mkdir(parents=True, exist_ok=True)
 
     dt_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    arquivo_log = pasta_logs / f"log_execucao_{dt_str}.txt"
+    arquivo_log = pasta_logs / f"{nome_prefixo}_{dt_str}.txt"
 
     logger = logging.getLogger("RoboSocietario")
     logger.setLevel(logging.INFO)
@@ -195,36 +195,47 @@ def main():
 
     # Ramo 1: Apenas Atualização de Certificados Digitais no Excel
     if operacao == "certificados":
+        try:
+            pasta_base.mkdir(parents=True, exist_ok=True)
+            (pasta_base / "PlanilhasBase").mkdir(parents=True, exist_ok=True)
+            (pasta_base / "Resultados").mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        arquivo_log = configurar_logger(pasta_base, nome_prefixo="log_certificados")
+        logger = logging.getLogger("RoboSocietario")
+
         pasta_planilhas = pasta_base / "PlanilhasBase"
         pasta_planilhas.mkdir(parents=True, exist_ok=True)
         p_excel = pasta_planilhas / "CNPJs.xlsx"
         if not p_excel.exists() and (pasta_base / "CNPJs.xlsx").exists():
             p_excel = pasta_base / "CNPJs.xlsx"
-        print("\n" + "=" * 70)
-        print(" ATUALIZAÇÃO DE CERTIFICADOS DIGITAIS (WINDOWS)")
-        print(f" Pasta Base: {pasta_base}")
-        print(f" Planilha:   {p_excel}")
-        print("=" * 70)
-        print(" Localizando certificados instalados em 'Certificados - Usuário Atual'...")
+
+        logger.info("=" * 70)
+        logger.info("ATUALIZAÇÃO DE CERTIFICADOS DIGITAIS (WINDOWS)")
+        logger.info(f"Pasta Base: {pasta_base}")
+        logger.info(f"Planilha:   {p_excel}")
+        logger.info(f"Arquivo de Log: {arquivo_log}")
+        logger.info("=" * 70)
+        logger.info("[CERTIFICADOS] Localizando certificados instalados em 'Certificados - Usuário Atual'...")
         codigo_saida = 0
         try:
             qtd = atualizar_aba_certificados_disponiveis(p_excel)
-            print(f"\n [SUCESSO] {qtd} certificado(s) digital(is) encontrado(s) e gravados com sucesso!")
-            print(f" Aba atualizada: 'Certificados_Disponiveis' na planilha:")
-            print(f" -> {p_excel}")
-            print("\n Instruções para preenchimento:")
-            print(" 1. Abra a planilha em 'PlanilhasBase/CNPJs.xlsx'.")
-            print(" 2. Consulte os certificados disponíveis na aba 'Certificados_Disponiveis'.")
-            print(" 3. Na aba 'CNPJs_consultados', preencha a coluna 'Certificado' com a Razão Social ou CNPJ.")
-            print(" 4. Salve e feche a planilha antes de rodar a automação do robô.")
+            logger.info(f"[CERTIFICADOS] [SUCESSO] {qtd} certificado(s) digital(is) encontrado(s) e gravados com sucesso!")
+            logger.info(f"[CERTIFICADOS] Aba atualizada: 'Certificados_Disponiveis' na planilha: {p_excel}")
+            logger.info("[CERTIFICADOS] Instruções:")
+            logger.info("[CERTIFICADOS] 1. Abra a planilha em 'PlanilhasBase/CNPJs.xlsx'.")
+            logger.info("[CERTIFICADOS] 2. Consulte os certificados disponíveis na aba 'Certificados_Disponiveis'.")
+            logger.info("[CERTIFICADOS] 3. Na aba 'CNPJs_consultados', preencha a coluna 'Certificado' com a Razão Social ou CNPJ.")
+            logger.info("[CERTIFICADOS] 4. Salve e feche a planilha antes de rodar a automação do robô.")
         except PermissionError as pe:
-            print(f"\n [AVISO DE ARQUIVO ABERTO] {pe}")
+            logger.error(f"[CERTIFICADOS] [AVISO DE ARQUIVO ABERTO] {pe}")
             codigo_saida = 1
         except Exception as e:
-            print(f"\n [ERRO] Falha ao coletar/gravar certificados: {e}")
+            logger.error(f"[CERTIFICADOS] [ERRO] Falha ao coletar/gravar certificados: {e}")
             codigo_saida = 1
         finally:
-            print("\n" + "=" * 70)
+            logger.info("=" * 70)
             if eh_interativo:
                 try:
                     input(" Pressione ENTER para fechar esta janela...")
@@ -244,6 +255,9 @@ def main():
         print(f"[ERRO CRÍTICO] Falha ao acessar ou criar as pastas base: {e}", file=sys.stderr)
         sys.exit(1)
 
+    arquivo_log = configurar_logger(pasta_base, nome_prefixo="log_execucao")
+    logger = logging.getLogger("RoboSocietario")
+
     # Atualiza preventivamente a aba de certificados na planilha padrão se possível
     pasta_planilhas = pasta_base / "PlanilhasBase"
     p_excel_padrao = pasta_planilhas / "CNPJs.xlsx"
@@ -254,9 +268,6 @@ def main():
             atualizar_aba_certificados_disponiveis(p_excel_padrao)
         except Exception:
             pass  # Se a planilha estiver aberta no momento, prossegue normalmente com a automação
-
-    arquivo_log = configurar_logger(pasta_base)
-    logger = logging.getLogger("RoboSocietario")
 
     logger.info("=" * 70)
     logger.info("INICIANDO AUTOMAÇÃO DET (ROBÔ SOCIETÁRIO)")
@@ -286,7 +297,7 @@ def main():
         logger.exception(f"FALHA INESPERADA NA EXECUÇÃO: {e}")
         codigo_saida = 1
     finally:
-        print("\n" + "=" * 70)
+        logger.info("=" * 70)
         if eh_interativo:
             try:
                 input(" Pressione ENTER para fechar esta janela...")

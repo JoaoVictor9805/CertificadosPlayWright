@@ -43,17 +43,17 @@ def obter_certificados_instalados_windows() -> List[Dict[str, Any]]:
             timeout=15,
         )
     except Exception as e:
-        logger.warning(f"Erro ao consultar certificados via PowerShell: {e}")
+        logger.warning(f"[CERTIFICADOS] Erro ao consultar certificados via PowerShell: {e}")
         return []
 
     if res.returncode != 0 or not res.stdout.strip():
-        logger.warning(f"PowerShell retornou código {res.returncode} ou saída vazia.")
+        logger.warning(f"[CERTIFICADOS] PowerShell retornou código {res.returncode} ou saída vazia.")
         return []
 
     try:
         data = json.loads(res.stdout)
     except Exception as e:
-        logger.warning(f"Falha ao decodificar JSON dos certificados: {e}")
+        logger.warning(f"[CERTIFICADOS] Falha ao decodificar JSON dos certificados: {e}")
         return []
 
     if isinstance(data, dict):
