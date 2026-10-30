@@ -74,22 +74,26 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: 4. Garante que os assets estejam disponiveis na pasta de distribuicao
+:: 4. Garante que os assets fiquem exclusivamente em _internal e nunca na raiz
+if exist "dist\RoboSocietario\assets" (
+    rmdir /s /q "dist\RoboSocietario\assets" >nul 2>&1
+)
 if exist "assets" (
-    echo [INFO] Copiando pasta assets para dist\RoboSocietario\assets...
-    if not exist "dist\RoboSocietario\assets" mkdir "dist\RoboSocietario\assets" >nul 2>&1
-    xcopy /e /y /i "assets" "dist\RoboSocietario\assets" >nul 2>&1
+    if not exist "dist\RoboSocietario\_internal\assets" mkdir "dist\RoboSocietario\_internal\assets" >nul 2>&1
+    xcopy /e /y /i "assets" "dist\RoboSocietario\_internal\assets" >nul 2>&1
 )
 
-:: 5. Copia as planilhas base, utilitários e manual para dentro de dist\RoboSocietario
+:: 5. Copia as planilhas base exclusivamente para PlanilhasBase, utilitários e manual
+if exist "dist\RoboSocietario\CNPJs.xlsx" (
+    del /f /q "dist\RoboSocietario\CNPJs.xlsx" >nul 2>&1
+)
 if not exist "dist\RoboSocietario\PlanilhasBase" mkdir "dist\RoboSocietario\PlanilhasBase" >nul 2>&1
 if exist "PlanilhasBase\CNPJs.xlsx" (
     echo [INFO] Incluindo planilha base em dist\RoboSocietario\PlanilhasBase\CNPJs.xlsx...
     copy /y "PlanilhasBase\CNPJs.xlsx" "dist\RoboSocietario\PlanilhasBase\CNPJs.xlsx" >nul 2>&1
-)
-if exist "CNPJs.xlsx" (
-    echo [INFO] Incluindo planilha base CNPJs.xlsx na raiz de dist\RoboSocietario...
-    copy /y "CNPJs.xlsx" "dist\RoboSocietario\CNPJs.xlsx" >nul 2>&1
+) else if exist "CNPJs.xlsx" (
+    echo [INFO] Incluindo planilha base em dist\RoboSocietario\PlanilhasBase\CNPJs.xlsx...
+    copy /y "CNPJs.xlsx" "dist\RoboSocietario\PlanilhasBase\CNPJs.xlsx" >nul 2>&1
 )
 if exist "Atualizar_Certificados.bat" (
     echo [INFO] Incluindo utilitario Atualizar_Certificados.bat em dist\RoboSocietario...
@@ -100,10 +104,19 @@ if exist "Manual_do_Usuario_RoboSocietario.pdf" (
     copy /y "Manual_do_Usuario_RoboSocietario.pdf" "dist\RoboSocietario\Manual_do_Usuario_RoboSocietario.pdf" >nul 2>&1
 )
 
-:: 6. Gera arquivo ZIP automaticamente para distribuicao imediata
+:: 6. Oculta a pasta _internal na distribuicao
+if exist "dist\RoboSocietario\_internal" (
+    echo [INFO] Ocultando pasta _internal...
+    attrib +h "dist\RoboSocietario\_internal" >nul 2>&1
+)
+
+:: 7. Gera arquivo ZIP automaticamente para distribuicao imediata preservando atributos
 if exist "dist\RoboSocietario.zip" del /f /q "dist\RoboSocietario.zip"
 echo [INFO] Compactando pasta para dist\RoboSocietario.zip...
-tar -a -cf "dist\RoboSocietario.zip" -C "dist" "RoboSocietario"
+%PYTHON_CMD% -c "import os, zipfile, ctypes; dist_dir = 'dist'; src_dir = os.path.join(dist_dir, 'RoboSocietario'); z_path = os.path.join(dist_dir, 'RoboSocietario.zip'); zf = zipfile.ZipFile(z_path, 'w', zipfile.ZIP_DEFLATED); [zf.writestr(zipfile.ZipInfo(os.path.relpath(os.path.join(r, d), dist_dir).replace('\\\\', '/') + '/', ((ctypes.windll.kernel32.GetFileAttributesW(os.path.join(r, d)) & 0xFF) | 0x10) if ctypes.windll.kernel32.GetFileAttributesW(os.path.join(r, d)) != -1 else 0x10), '') for r, dirs, _ in os.walk(src_dir) for d in dirs]; [zf.writestr(zipfile.ZipInfo(os.path.relpath(os.path.join(r, f), dist_dir).replace('\\\\', '/'), ctypes.windll.kernel32.GetFileAttributesW(os.path.join(r, f)) & 0xFF if ctypes.windll.kernel32.GetFileAttributesW(os.path.join(r, f)) != -1 else 0), open(os.path.join(r, f), 'rb').read(), compress_type=zipfile.ZIP_DEFLATED) for r, _, files in os.walk(src_dir) for f in files]; zf.close()"
+if not exist "dist\RoboSocietario.zip" (
+    tar -a -cf "dist\RoboSocietario.zip" -C "dist" "RoboSocietario"
+)
 
 echo.
 echo ======================================================================
