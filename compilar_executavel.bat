@@ -81,18 +81,23 @@ if exist "assets" (
     xcopy /e /y /i "assets" "dist\RoboSocietario\assets" >nul 2>&1
 )
 
-:: 5. Copia a planilha CNPJs.xlsx e utilitarios para dentro de dist\RoboSocietario
+:: 5. Copia as planilhas base, utilitários e manual para dentro de dist\RoboSocietario
+if not exist "dist\RoboSocietario\PlanilhasBase" mkdir "dist\RoboSocietario\PlanilhasBase" >nul 2>&1
+if exist "PlanilhasBase\CNPJs.xlsx" (
+    echo [INFO] Incluindo planilha base em dist\RoboSocietario\PlanilhasBase\CNPJs.xlsx...
+    copy /y "PlanilhasBase\CNPJs.xlsx" "dist\RoboSocietario\PlanilhasBase\CNPJs.xlsx" >nul 2>&1
+)
 if exist "CNPJs.xlsx" (
-    echo [INFO] Incluindo planilha base CNPJs.xlsx em dist\RoboSocietario...
+    echo [INFO] Incluindo planilha base CNPJs.xlsx na raiz de dist\RoboSocietario...
     copy /y "CNPJs.xlsx" "dist\RoboSocietario\CNPJs.xlsx" >nul 2>&1
 )
 if exist "Atualizar_Certificados.bat" (
     echo [INFO] Incluindo utilitario Atualizar_Certificados.bat em dist\RoboSocietario...
     copy /y "Atualizar_Certificados.bat" "dist\RoboSocietario\Atualizar_Certificados.bat" >nul 2>&1
 )
-if exist "Manual_do_Usuario_RoboSocietario.docx" (
-    echo [INFO] Incluindo Manual do Usuario .docx em dist\RoboSocietario...
-    copy /y "Manual_do_Usuario_RoboSocietario.docx" "dist\RoboSocietario\Manual_do_Usuario_RoboSocietario.docx" >nul 2>&1
+if exist "Manual_do_Usuario_RoboSocietario.pdf" (
+    echo [INFO] Incluindo Manual do Usuario .pdf em dist\RoboSocietario...
+    copy /y "Manual_do_Usuario_RoboSocietario.pdf" "dist\RoboSocietario\Manual_do_Usuario_RoboSocietario.pdf" >nul 2>&1
 )
 
 :: 6. Gera arquivo ZIP automaticamente para distribuicao imediata
@@ -114,15 +119,14 @@ if exist "dist\RoboSocietario.zip" (
     echo  Ao descompactar, tudo fica na mesma pasta:
     echo    - Executavel: RoboSocietario.exe (da 2 cliques direto para rodar)
     echo    - Utilitario: Atualizar_Certificados.bat (atualizacao rapida com 2 cliques)
-    echo    - Planilha base: CNPJs.xlsx (com abas CNPJs_consultados e Certificados_Disponiveis)
-    echo    - Manual: Manual_do_Usuario_RoboSocietario.docx (passo a passo para o usuario)
-    echo    - Evidencias: pasta CapturasDeTela-Downloads (com prints e anexos baixados)
-    echo    - Relatorio geral: pasta Relatorios
+    echo    - Planilha base: PlanilhasBase\CNPJs.xlsx (com abas CNPJs_consultados e Certificados_Disponiveis)
+    echo    - Manual: Manual_do_Usuario_RoboSocietario.pdf (guia passo a passo para o usuario)
+    echo    - Evidencias: pasta Resultados\CapturasDeTela-Downloads (com prints e anexos baixados)
+    echo    - Relatorio geral: pasta Resultados\Relatorios
 ) else (
     echo.
     echo  Como distribuir para os usuarios:
     echo    1. Copie ou compacte (ZIP) a pasta "dist\RoboSocietario".
     echo    2. O usuario clica duas vezes direto em "RoboSocietario.exe" para rodar!
 )
-echo.
-pause
+if not "%1"=="--no-pause" pause

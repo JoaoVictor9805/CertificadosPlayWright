@@ -247,6 +247,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <p><strong>Gerenciamento de Instabilidades do Portal:</strong> Os portais do governo frequentemente passam por oscilações temporárias de conexão. Pensando nisso, o robô possui mecanismos de proteção automáticos:</p>
     <ul>
         <li><strong>Planilha de pendências (CNPJs_Pendentes.xlsx):</strong> Se alguma empresa não responder (ou se exigir validação por celular / 2FA) durante a execução do robô, ela é registrada automaticamente em <em>PlanilhasBase/CNPJs_Pendentes.xlsx</em>.</li>
+        <li><strong>Segunda passagem:</strong> Se algum CNPJ for registrado como pendente, o robô automaticamente tentará analisar ele novamente. Caso obtenha sucesso nessa análise, o CNPJ sai da planilha CNPJs_Pendentes e é registrado normalmente.</li>
     </ul>
 
     <p>Caso existam pendências de uma execução anterior, ao abrir o <strong>RoboSocietario.exe</strong> você poderá escolher de forma simples:</p>
@@ -271,7 +272,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <p>Ao finalizar o processamento de todos os itens, o robô exibirá uma mensagem de conclusão na tela e aguardará você pressionar ENTER para fechar a janela. Todos os resultados e evidências ficam organizados dentro da pasta <strong>Resultados</strong>:</p>
 
     <p><strong>1. Pasta 'Resultados/Relatorios':</strong><br>
-    Contém a planilha consolidada em Excel gerada a cada execução, identificada com data e hora (exemplo: <em>Relatorio_Execucao_2026-10-30_09-00-00.xlsx</em>). Essa planilha traz o resumo completo de cada empresa consultada, indicando se foram encontradas mensagens na Caixa Postal, se havia novas notificações trabalhistas, quantidade de anexos e links diretos para a pasta das imagens.</p>
+    Contém a planilha consolidada em Excel gerada a cada execução, identificada com data e hora (exemplo: <em>Relatorio_Execucao_30-10-2026_09-00-00.xlsx</em>). Essa planilha lista cada CNPJ consultado, o certificado utilizado, o status e detalhes da 1ª e 2ª tentativa, a quantidade de arquivos guardados (ou o motivo em caso de erro), o Status Final destacado visualmente por cor (verde para Sucesso, amarelo para Confirmação de Identidade e vermelho para Falhas) e a data/hora exata da consulta.</p>
 
     <p><strong>2. Pasta 'Resultados/CapturasDeTela-Downloads':</strong><br>
     Armazena o dossiê completo de auditoria organizado cronologicamente por data e hora da execução, agrupado por certificado digital e com uma subpasta individual para cada CNPJ consultado. Dentro de cada pasta ficam salvos:</p>
