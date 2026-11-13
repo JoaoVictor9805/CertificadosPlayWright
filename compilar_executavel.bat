@@ -113,7 +113,7 @@ if exist "dist\RoboSocietario\_internal" (
 :: 7. Gera arquivo ZIP automaticamente para distribuicao imediata preservando atributos
 if exist "dist\RoboSocietario.zip" del /f /q "dist\RoboSocietario.zip"
 echo [INFO] Compactando pasta para dist\RoboSocietario.zip...
-%PYTHON_CMD% -c "import os, zipfile, ctypes; dist_dir = 'dist'; src_dir = os.path.join(dist_dir, 'RoboSocietario'); z_path = os.path.join(dist_dir, 'RoboSocietario.zip'); zf = zipfile.ZipFile(z_path, 'w', zipfile.ZIP_DEFLATED); [zf.writestr(zipfile.ZipInfo(os.path.relpath(os.path.join(r, d), dist_dir).replace('\\\\', '/') + '/', ((ctypes.windll.kernel32.GetFileAttributesW(os.path.join(r, d)) & 0xFF) | 0x10) if ctypes.windll.kernel32.GetFileAttributesW(os.path.join(r, d)) != -1 else 0x10), '') for r, dirs, _ in os.walk(src_dir) for d in dirs]; [zf.writestr(zipfile.ZipInfo(os.path.relpath(os.path.join(r, f), dist_dir).replace('\\\\', '/'), ctypes.windll.kernel32.GetFileAttributesW(os.path.join(r, f)) & 0xFF if ctypes.windll.kernel32.GetFileAttributesW(os.path.join(r, f)) != -1 else 0), open(os.path.join(r, f), 'rb').read(), compress_type=zipfile.ZIP_DEFLATED) for r, _, files in os.walk(src_dir) for f in files]; zf.close()"
+%PYTHON_CMD% -c "import shutil; shutil.make_archive('dist/RoboSocietario', 'zip', 'dist', 'RoboSocietario')"
 if not exist "dist\RoboSocietario.zip" (
     tar -a -cf "dist\RoboSocietario.zip" -C "dist" "RoboSocietario"
 )

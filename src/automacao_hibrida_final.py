@@ -1065,6 +1065,35 @@ def efetuar_logout_det(page):
         logger.warning(f"[LOGOUT] Aviso durante tentativa de logout: {e}")
 
 
+def rolar_pagina_para_o_topo(page, seletor_topo: Optional[str] = None):
+    """
+    Rola a página da web completamente para o topo (scroll 0, 0),
+    garantindo que cabeçalho, abas e elementos superiores fiquem visíveis.
+    Se um seletor de topo for informado, também posiciona o elemento no topo.
+    Suporta tanto a janela principal (window/document) quanto contêineres Angular com scroll interno.
+    """
+    try:
+        if seletor_topo:
+            loc = page.locator(seletor_topo).first
+            if loc.count() > 0 and loc.is_visible():
+                loc.evaluate("el => el.scrollIntoView({ block: 'start', inline: 'nearest' })")
+    except Exception:
+        pass
+
+    try:
+        page.evaluate("""() => {
+            window.scrollTo(0, 0);
+            if (document.documentElement) document.documentElement.scrollTop = 0;
+            if (document.body) document.body.scrollTop = 0;
+            const scrollables = document.querySelectorAll('main, .main-content, app-root, .container, [class*="scroll"], [class*="content"]');
+            scrollables.forEach(el => {
+                if (el.scrollTop) el.scrollTop = 0;
+            });
+        }""")
+    except Exception:
+        pass
+
+
 def processar_item_det(
     page,
     item_id: str,
@@ -1092,6 +1121,7 @@ def processar_item_det(
         etapa = "Aguardando a tela de serviços"
         page.locator(".cardListItem:has(span.title:has-text('CAIXA POSTAL'))").wait_for(state="visible", timeout=60000)
         time.sleep(DELAY_ENTRE_ACOES_S)
+        rolar_pagina_para_o_topo(page)
 
         etapa = "Trocando de perfil"
         btn_trocar_perfil = page.locator("button:has-text('Trocar Perfil')").first
@@ -1180,6 +1210,10 @@ def processar_item_det(
             pass
         time.sleep(DELAY_ENTRE_ACOES_S)
 
+        # Garante que a tela da Caixa Postal suba completamente para o topo
+        rolar_pagina_para_o_topo(page, "h1:has-text('Caixa Postal'), h2:has-text('Caixa Postal'), span:has-text('Caixa de Entrada')")
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
         # 1. Print ANTES de clicar em 'Exibir apenas não lidas' (visão geral / todas)
         etapa = "Tirando print da Caixa Postal antes do filtro"
         try:
@@ -1191,6 +1225,10 @@ def processar_item_det(
             }""")
         except Exception:
             pass
+
+        # Reforço de rolagem para o topo imediatamente antes da captura
+        rolar_pagina_para_o_topo(page)
+        time.sleep(0.2)
 
         caminho_print_antes = pasta_caixa_postal / f"{item_id}_{formatted_dt}_parte1_todas.jpg"
         page.screenshot(path=str(caminho_print_antes), type="jpeg")
@@ -1280,6 +1318,11 @@ def processar_item_det(
 
         # Tira SEMPRE o print após o filtro (mostrando apenas não lidas ou comprovando que não há nenhuma)
         time.sleep(DELAY_ENTRE_ACOES_S)
+
+        # Garante que a tela suba para o topo antes do print após o filtro
+        rolar_pagina_para_o_topo(page, "h1:has-text('Caixa Postal'), h2:has-text('Caixa Postal'), span:has-text('Caixa de Entrada')")
+        time.sleep(DELAY_ENTRE_ACOES_S)
+
         try:
             page.mouse.move(0, 0)
             time.sleep(0.6)
@@ -1289,6 +1332,10 @@ def processar_item_det(
             }""")
         except Exception:
             pass
+
+        # Reforço de rolagem para o topo imediatamente antes da captura
+        rolar_pagina_para_o_topo(page)
+        time.sleep(0.2)
 
         caminho_print_depois = pasta_caixa_postal / f"{item_id}_{formatted_dt}_parte2_nao_lidas.jpg"
         page.screenshot(path=str(caminho_print_depois), type="jpeg")
@@ -1306,6 +1353,7 @@ def processar_item_det(
         else:
             page.goto(URL_SERVICOS, timeout=60000)
         time.sleep(DELAY_ENTRE_ACOES_S)
+        rolar_pagina_para_o_topo(page)
 
         # --- NOTIFICAÇÃO ---
         etapa = "Abrindo a tela de Notificação"
@@ -1385,10 +1433,7 @@ def processar_item_det(
             )
 
             # Posiciona no topo
-            try:
-                page.evaluate("window.scrollTo(0, 0)")
-            except Exception:
-                pass
+            rolar_pagina_para_o_topo(page)
             time.sleep(DELAY_ENTRE_ACOES_S)
 
             try:
@@ -1473,10 +1518,7 @@ def processar_item_det(
             linhas_ja_capturadas = set()
 
             # 1. Primeiro print: Tela inicial no topo (mostrando dados do Empregador, Usuário e filtros)
-            try:
-                page.evaluate("window.scrollTo(0, 0)")
-            except Exception:
-                pass
+            rolar_pagina_para_o_topo(page)
             time.sleep(DELAY_ENTRE_ACOES_S)
 
             try:
@@ -1679,9 +1721,9 @@ def processar_item_det(
                     )
         else:
             # Caso residual sem linhas ou sem notificações: tira print único comprobatório
+            rolar_pagina_para_o_topo(page)
+            time.sleep(DELAY_ENTRE_ACOES_S)
             try:
-                page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(0.3)
                 page.mouse.move(0, 0)
                 time.sleep(0.3)
                 page.evaluate("""() => {
@@ -1700,6 +1742,7 @@ def processar_item_det(
         time.sleep(DELAY_ENTRE_ACOES_S)
         page.goto(URL_SERVICOS, timeout=60000)
         time.sleep(DELAY_ENTRE_ACOES_S)
+        rolar_pagina_para_o_topo(page)
 
         # Limpeza de diretórios vazios e contabilização
         etapa = "Limpando subpastas vazias"
@@ -1715,6 +1758,13 @@ def processar_item_det(
 
     except Exception as e:
         logger.error(f"[{item_id}] [{etapa}] Falha crítica: {e}")
+        try:
+            pasta_item.mkdir(parents=True, exist_ok=True)
+            caminho_erro_item = pasta_item / f"erro_etapa_{sanitizar_nome_pasta(etapa)}.jpg"
+            page.screenshot(path=str(caminho_erro_item), type="jpeg")
+            logger.info(f"[{item_id}] [COMPROVANTE] Screenshot do erro salvo em: {caminho_erro_item.name}")
+        except Exception:
+            pass
         try:
             page.goto(URL_SERVICOS, timeout=60000)
         except Exception:
@@ -1756,6 +1806,7 @@ def processar_item_det_com_retry(
         try:
             page.goto(URL_SERVICOS, timeout=45000)
             time.sleep(2)
+            rolar_pagina_para_o_topo(page)
             sucesso, status_code, detalhe = processar_item_det(
                 page=page,
                 item_id=item_id,
@@ -2232,7 +2283,8 @@ def processar_sessao_certificado(
                     continue
                 else:
                     logger.error(f"[PORTAL GOV.BR INDISPONÍVEL] O portal não respondeu após {MAX_TENTATIVAS_PORTAL} tentativas com intervalo de 60s.")
-                    caminho_print_erro_gov = screenshots_dir / f"erro_govbr_indisponivel_{nome_cert_exibicao[:20]}.jpg"
+                    pasta_cert.mkdir(parents=True, exist_ok=True)
+                    caminho_print_erro_gov = pasta_cert / "00_erro_govbr_indisponivel.jpg"
                     try:
                         pyautogui.screenshot(str(caminho_print_erro_gov))
                         logger.info(f"[COMPROVANTE] Screenshot do erro no gov.br salvo em: {caminho_print_erro_gov.name}")
@@ -2421,7 +2473,8 @@ def processar_sessao_certificado(
                     time.sleep(10)
             else:
                 logger.error(f"[PORTAL DET/GOV.BR INDISPONÍVEL] O portal não respondeu após {MAX_TENTATIVAS_PORTAL} tentativas com intervalo de 60s: {motivo_falha_portal}.")
-                caminho_print_erro_gov = screenshots_dir / f"erro_det_indisponivel_{nome_cert_exibicao[:20]}.jpg"
+                pasta_cert.mkdir(parents=True, exist_ok=True)
+                caminho_print_erro_gov = pasta_cert / "00_erro_det_indisponivel.jpg"
                 try:
                     pyautogui.screenshot(str(caminho_print_erro_gov))
                     logger.info(f"[COMPROVANTE] Screenshot do erro no DET salvo em: {caminho_print_erro_gov.name}")
