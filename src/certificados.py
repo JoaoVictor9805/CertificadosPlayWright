@@ -107,7 +107,7 @@ def formatar_aba_cnpjs_consultados(ws):
     )
 
     ws.row_dimensions[1].height = 24
-    for col_idx in [1, 2]:
+    for col_idx in [1, 2, 3]:
         cell = ws.cell(row=1, column=col_idx)
         cell.fill = cor_header
         cell.font = fonte_header
@@ -129,6 +129,7 @@ def formatar_aba_cnpjs_consultados(ws):
 
     ws.column_dimensions["A"].width = 25
     ws.column_dimensions["B"].width = 65
+    ws.column_dimensions["C"].width = 45
 
 
 def atualizar_aba_certificados_disponiveis(caminho_planilha: Path) -> int:

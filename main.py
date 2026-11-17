@@ -174,7 +174,7 @@ def obter_argumentos() -> Tuple[Path, str, Optional[str], bool]:
     elif p_pendentes.exists() and not p_principal.exists():
         planilha_especifica = str(p_pendentes)
     else:
-        planilha_especifica = str(p_principal) if p_principal.exists() else "CNPJs.xlsx"
+        planilha_especifica = str(p_principal) if p_principal.exists() else None
 
     return pasta_base, "automacao", planilha_especifica, eh_interativo
 

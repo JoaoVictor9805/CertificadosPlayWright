@@ -6,6 +6,7 @@ import warnings
 if not hasattr(sys, "coinit_flags"):
     sys.coinit_flags = 2
 warnings.filterwarnings("ignore", message=".*Apply externally defined coinit_flags.*")
+
 import re
 import time
 import shutil
@@ -51,10 +52,6 @@ CDP_PORT = 9222
 DELAY_ENTRE_ACOES_S = 0.5
 DELAY_SLOW_MO_MS = 500
 
-# Tempo máximo de uma mesma sessão autenticada no DET antes da renovação preventiva (em segundos).
-# Como o portal DET/Gov.br encerra sessões após cerca de 30 minutos, renovar aos 25 minutos evita falhas em lote.
-TEMPO_RENOVACAO_SESSAO_S = 25 * 60
-
 def obter_caminho_recurso(caminho_relativo: str) -> Path:
     """
     Retorna o caminho absoluto do recurso, compatível com execução direta (Python),
@@ -99,6 +96,43 @@ def sanitizar_nome_pasta(cert_nome: str) -> str:
     if not nome_limpo:
         return "Certificado"
     return nome_limpo[:60].strip(" ._")
+
+
+def extrair_cnpj_certificado(cert_nome: str) -> str:
+    """
+    Extrai o CNPJ (14 dígitos) de uma string de certificado, ex.:
+    'FALAVINHA NEXT ASSESSORIA EMPRESARIAL LTDA:20791304000121' -> '20791304000121'.
+    """
+    if not cert_nome:
+        return ""
+    texto = str(cert_nome).strip()
+    if ":" in texto:
+        parte_doc = re.sub(r"\D", "", texto.rsplit(":", 1)[1])
+        if len(parte_doc) == 14:
+            return parte_doc
+    match = re.search(r"(?<!\d)(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})(?!\d)", texto)
+    if match:
+        digitos = re.sub(r"\D", "", match.group(1))
+        if len(digitos) == 14:
+            return digitos
+    return ""
+
+
+def eh_cnpj_do_certificado(cnpj_item: str, cert_nome: str) -> bool:
+    """Retorna True se o CNPJ informado coincidir com o CNPJ de 14 dígitos do certificado."""
+    cnpj_cert = extrair_cnpj_certificado(cert_nome)
+    if not cnpj_cert:
+        return False
+    cnpj_doc = re.sub(r"\D", "", str(cnpj_item or ""))
+    return len(cnpj_doc) == 14 and cnpj_doc == cnpj_cert
+
+
+def priorizar_proprio_certificado_no_grupo(lista_cnpjs: list[str], cert_nome: str) -> list[str]:
+    """
+    Reordena os CNPJs do grupo para que o CNPJ titular do certificado venha primeiro,
+    aproveitando o estado inicial 'Meu Perfil' logo após o login no DET.
+    """
+    return sorted(lista_cnpjs, key=lambda doc: 0 if eh_cnpj_do_certificado(doc, cert_nome) else 1)
 
 
 # Imagens de referência para o login físico via PyAutoGUI (procura em assets/ e fallback)
@@ -1153,6 +1187,260 @@ def rolar_pagina_para_o_topo(page, seletor_topo: Optional[str] = None):
         pass
 
 
+def posicionar_titulo_caixa_postal_no_topo(page):
+    """
+    Posiciona o título grande 'Caixa Postal' diretamente no topo da área visível
+    (sem rolar antes para o topo absoluto da página, evitando sobe-e-desce na tela).
+    """
+    try:
+        loc_titulo = page.locator(
+            "h1:has-text('Caixa Postal'), "
+            "h2:has-text('Caixa Postal'), "
+            "[role='heading']:has-text('Caixa Postal')"
+        ).first
+        if loc_titulo.count() > 0 and loc_titulo.is_visible():
+            loc_titulo.evaluate("""el => {
+                const rect = el.getBoundingClientRect();
+                if (Math.abs(rect.top) > 4) {
+                    el.scrollIntoView({ block: 'start', inline: 'nearest' });
+                }
+            }""")
+            return
+    except Exception:
+        pass
+    rolar_pagina_para_o_topo(page)
+
+
+def _limpar_tooltips_e_cursor(page, espera_s: float = 0.3):
+    try:
+        page.mouse.move(0, 0)
+        time.sleep(espera_s)
+        page.evaluate("""() => {
+            const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
+            tooltips.forEach(t => t.remove());
+        }""")
+    except Exception:
+        pass
+
+
+def _detectar_seletor_matriz_filiais(page) -> bool:
+    """Identifica se a tela da Caixa Postal exibe a seleção entre Matriz e Filiais."""
+    try:
+        loc_matriz = page.get_by_text("Matriz", exact=True).first
+        loc_filiais = page.get_by_text("Filiais", exact=True).first
+        if not (
+            loc_matriz.count() > 0
+            and loc_matriz.is_visible()
+            and loc_filiais.count() > 0
+            and loc_filiais.is_visible()
+        ):
+            return False
+
+        loc_seletor = page.get_by_text("Selecione um perfil para exibir as mensagens", exact=False).first
+        if loc_seletor.count() > 0 and loc_seletor.is_visible():
+            return True
+
+        radios = page.locator("input[type='radio'], [role='radio'], .br-radio")
+        return radios.count() >= 2
+    except Exception:
+        return False
+
+
+def _selecionar_perfil_caixa_postal(page, item_id: str, opcao: str) -> bool:
+    """Seleciona a opção 'Matriz' ou 'Filiais' na tela da Caixa Postal."""
+    try:
+        loc_radio = page.get_by_role("radio", name=opcao, exact=True).first
+        if loc_radio.count() > 0:
+            try:
+                if loc_radio.is_checked():
+                    return True
+            except Exception:
+                pass
+
+        candidatos = [
+            page.locator(f"label:has-text('{opcao}')").first,
+            page.get_by_text(opcao, exact=True).first,
+            loc_radio,
+        ]
+        for cand in candidatos:
+            try:
+                if cand.count() > 0 and cand.is_visible():
+                    cand.click()
+                    log_etapa(item_id, "Caixa Postal", f"Perfil '{opcao}' selecionado.")
+                    time.sleep(2)
+                    return True
+            except Exception:
+                continue
+
+        if loc_radio.count() > 0:
+            loc_radio.click(force=True)
+            log_etapa(item_id, "Caixa Postal", f"Perfil '{opcao}' selecionado.")
+            time.sleep(2)
+            return True
+    except Exception as e:
+        logger.warning(f"[{item_id}] [CAIXA POSTAL] Falha ao selecionar '{opcao}': {e}")
+    return False
+
+
+def _tem_aviso_caixa_postal_vazia(page) -> bool:
+    """Detecta o banner amarelo informando que não consta nenhuma mensagem na Caixa Postal."""
+    try:
+        loc_aviso = page.get_by_text(
+            re.compile(r"n[ãa]o\s+consta\s+nenhuma\s+mensagem\s+em\s+sua\s+caixa\s+postal", re.I)
+        ).first
+        return loc_aviso.count() > 0 and loc_aviso.is_visible()
+    except Exception:
+        return False
+
+
+def _capturar_caixa_postal_fluxo(
+    page,
+    item_id: str,
+    pasta_caixa_postal: Path,
+    formatted_dt: str,
+    prefixo_arquivo: str = "",
+    rotulo_log: str = "",
+):
+    """
+    Executa a captura da Caixa Postal com o título 'Caixa Postal' posicionado no topo da tela:
+    - Se aparecer o aviso amarelo de nenhuma mensagem, tira apenas 1 print e não clica no filtro.
+    - Caso contrário, tira o print exibindo todas, clica em 'Exibir apenas não lidas' e tira o 2º print.
+    """
+    sufixo_log = f" [{rotulo_log}]" if rotulo_log else ""
+
+    # Garante que o filtro esteja exibindo TODAS antes de verificar/capturar (útil ao trocar de Matriz para Filiais)
+    btn_exibir_todas = page.locator(
+        "span:has-text('Exibir todas'), a:has-text('Exibir todas'), button:has-text('Exibir todas')"
+    )
+    try:
+        if btn_exibir_todas.count() > 0 and btn_exibir_todas.first.is_visible():
+            btn_exibir_todas.first.click()
+            log_etapa(item_id, "Caixa Postal", f"Filtro ajustado para 'Exibir todas'{sufixo_log}.")
+            time.sleep(2)
+    except Exception:
+        pass
+
+    # Se o aviso amarelo de Caixa Postal vazia estiver na tela, tira apenas 1 print e encerra
+    if _tem_aviso_caixa_postal_vazia(page):
+        etapa = f"Tirando print único da Caixa Postal (sem mensagens){sufixo_log}"
+        posicionar_titulo_caixa_postal_no_topo(page)
+        _limpar_tooltips_e_cursor(page, espera_s=0.3)
+        time.sleep(0.2)
+
+        caminho_print_unico = pasta_caixa_postal / f"{item_id}_{formatted_dt}_{prefixo_arquivo}parte1_sem_mensagens.jpg"
+        page.screenshot(path=str(caminho_print_unico), type="jpeg")
+        log_etapa(
+            item_id,
+            etapa,
+            f"Aviso amarelo detectado (nenhuma mensagem). Print único realizado sem filtrar não lidas{sufixo_log}: {caminho_print_unico.name}",
+        )
+        time.sleep(DELAY_ENTRE_ACOES_S)
+        return
+
+    # 1. Print ANTES de clicar em 'Exibir apenas não lidas' (visão geral / todas)
+    etapa = f"Tirando print da Caixa Postal antes do filtro{sufixo_log}"
+    posicionar_titulo_caixa_postal_no_topo(page)
+    _limpar_tooltips_e_cursor(page, espera_s=0.3)
+    time.sleep(0.2)
+
+    caminho_print_antes = pasta_caixa_postal / f"{item_id}_{formatted_dt}_{prefixo_arquivo}parte1_todas.jpg"
+    page.screenshot(path=str(caminho_print_antes), type="jpeg")
+    log_etapa(item_id, etapa, f"Print da Caixa Postal (antes do filtro / todas){sufixo_log} realizado com sucesso: {caminho_print_antes.name}")
+    time.sleep(DELAY_ENTRE_ACOES_S)
+
+    # 2. Clica em 'Exibir apenas não lidas'
+    etapa = f"Filtrando por mensagens não lidas{sufixo_log}"
+    loc_nao_lidas_filtro = page.locator(
+        "span:has-text('Exibir apenas não lidas'), "
+        "a:has-text('Exibir apenas não lidas'), "
+        "button:has-text('Exibir apenas não lidas')"
+    ).first
+
+    clicou_filtro = False
+    try:
+        loc_nao_lidas_filtro.wait_for(state="visible", timeout=8000)
+        time.sleep(0.3)
+        loc_nao_lidas_filtro.click()
+        clicou_filtro = True
+        log_etapa(item_id, etapa, f"Filtro 'Exibir apenas não lidas' acionado com sucesso{sufixo_log}.")
+        time.sleep(2)
+    except Exception:
+        try:
+            btn_fallback = page.get_by_text("Exibir apenas não lidas", exact=False).first
+            if btn_fallback.is_visible():
+                btn_fallback.click()
+                clicou_filtro = True
+                log_etapa(item_id, etapa, f"Filtro 'Exibir apenas não lidas' acionado via get_by_text{sufixo_log}.")
+                time.sleep(2)
+        except Exception:
+            pass
+
+    if clicou_filtro:
+        try:
+            page.mouse.move(0, 0)
+        except Exception:
+            pass
+    else:
+        if btn_exibir_todas.count() > 0 and btn_exibir_todas.first.is_visible():
+            log_etapa(item_id, etapa, f"Filtro de não lidas já está ativo ('Exibir todas' presente){sufixo_log}.")
+        else:
+            log_etapa(item_id, etapa, f"Aviso: opção 'Exibir apenas não lidas' não foi localizada{sufixo_log}.")
+
+    # 3. Depois de filtrar: verifica se há mensagens não lidas na tela
+    etapa = f"Tirando print da Caixa Postal após o filtro{sufixo_log}"
+    time.sleep(0.5)
+
+    loc_nao_lidas = page.locator(
+        ".linha.nao-lida, "
+        ".linha:has(i.fa-envelope.active), "
+        ".linha:has(i.fa-envelope), "
+        "i.fa-envelope.active, "
+        "div[class*='nao-lida']"
+    )
+    loc_contador_aba = page.get_by_text(re.compile(r"Caixa de Entrada\s*\([1-9]\d*\)", re.I))
+    linhas_tabela = page.locator(".tabela.mensagens .linha, .tabela .linha")
+    msg_vazio = (
+        page.locator(".empty-row")
+        .or_(page.get_by_text(re.compile(r"nenhum registro|nenhuma mensagem|não há mensagens", re.I)))
+    )
+
+    tem_msg_nao_lida = False
+    try:
+        if loc_nao_lidas.count() > 0 and loc_nao_lidas.first.is_visible():
+            tem_msg_nao_lida = True
+        elif loc_contador_aba.count() > 0 and loc_contador_aba.first.is_visible():
+            tem_msg_nao_lida = True
+        else:
+            filtro_ativo = btn_exibir_todas.count() > 0 and btn_exibir_todas.first.is_visible()
+            tabela_tem_linhas = linhas_tabela.count() > 0 and linhas_tabela.first.is_visible()
+            tabela_vazia = msg_vazio.count() > 0 and msg_vazio.first.is_visible()
+
+            if (filtro_ativo or clicou_filtro) and tabela_tem_linhas and not tabela_vazia:
+                tem_msg_nao_lida = True
+            else:
+                try:
+                    loc_nao_lidas.first.wait_for(state="visible", timeout=3000)
+                    tem_msg_nao_lida = True
+                except PlaywrightTimeoutError:
+                    tem_msg_nao_lida = False
+    except Exception as e:
+        logger.warning(f"[{item_id}] [CAIXA POSTAL] Erro ao verificar mensagens não lidas{sufixo_log}: {e}")
+        tem_msg_nao_lida = False
+
+    time.sleep(DELAY_ENTRE_ACOES_S)
+    posicionar_titulo_caixa_postal_no_topo(page)
+    _limpar_tooltips_e_cursor(page, espera_s=0.6)
+    time.sleep(0.2)
+
+    caminho_print_depois = pasta_caixa_postal / f"{item_id}_{formatted_dt}_{prefixo_arquivo}parte2_nao_lidas.jpg"
+    page.screenshot(path=str(caminho_print_depois), type="jpeg")
+    if tem_msg_nao_lida:
+        log_etapa(item_id, etapa, f"Print da Caixa Postal (após filtro / não lidas encontradas){sufixo_log} realizado com sucesso: {caminho_print_depois.name}")
+    else:
+        log_etapa(item_id, etapa, f"Print da Caixa Postal (após filtro / sem não lidas){sufixo_log} realizado com sucesso: {caminho_print_depois.name}")
+    time.sleep(DELAY_ENTRE_ACOES_S)
+
+
 def processar_item_det(
     page,
     item_id: str,
@@ -1163,6 +1451,8 @@ def processar_item_det(
     perfil_ref: list,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
+    nome_empresa = "",
+    eh_proprio_certificado: bool = False,
 ) -> tuple[bool, str, str]:
     """
     Processa um único CNPJ dentro de uma sessão autenticada do DET:
@@ -1186,68 +1476,77 @@ def processar_item_det(
         time.sleep(DELAY_ENTRE_ACOES_S)
         rolar_pagina_para_o_topo(page)
 
-        etapa = "Trocando de perfil"
-        btn_trocar_perfil = page.locator("button:has-text('Trocar Perfil')").first
-        btn_trocar_perfil.wait_for(state="visible", timeout=20000)
-        time.sleep(DELAY_ENTRE_ACOES_S)
-        btn_trocar_perfil.click()
-        time.sleep(2)
-
-        # Clica no dropdown de seleção de perfil e navega via teclado como no PAD
-        dropdown_perfil = page.locator("ng-select, .br-select, span.ng-arrow-wrapper").first
-        dropdown_perfil.click()
-        time.sleep(DELAY_ENTRE_ACOES_S)
-
-        if perfil_ref[0] == 0:
-            perfil_ref[0] += 1
-            page.keyboard.press("ArrowDown")
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            page.keyboard.press("Enter")
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            page.keyboard.press("Tab")
+        if eh_proprio_certificado and perfil_ref[0] == 0:
+            etapa = "Mantendo perfil próprio do certificado"
+            log_etapa(
+                item_id,
+                etapa,
+                "CNPJ coincide com o titular do certificado; mantendo 'Meu Perfil' sem acessar 'Trocar Perfil'.",
+            )
         else:
-            page.keyboard.press("ArrowDown")
+            etapa = "Trocando de perfil"
+            btn_trocar_perfil = page.locator("button:has-text('Trocar Perfil')").first
+            btn_trocar_perfil.wait_for(state="visible", timeout=20000)
             time.sleep(DELAY_ENTRE_ACOES_S)
-            page.keyboard.press("ArrowDown")
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            page.keyboard.press("Enter")
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            page.keyboard.press("Tab")
+            btn_trocar_perfil.click()
+            time.sleep(2)
 
-        time.sleep(DELAY_ENTRE_ACOES_S)
-        page.keyboard.type(item_id, delay=100)
-        time.sleep(DELAY_ENTRE_ACOES_S)
+            # Clica no dropdown de seleção de perfil e navega via teclado como no PAD
+            dropdown_perfil = page.locator("ng-select, .br-select, span.ng-arrow-wrapper").first
+            dropdown_perfil.click()
+            time.sleep(DELAY_ENTRE_ACOES_S)
 
-        etapa = "Selecionando o perfil e validando CNPJ"
-        page.locator("button:has-text('Selecionar')").first.click()
-        time.sleep(2)
+            if perfil_ref[0] == 0:
+                perfil_ref[0] += 1
+                page.keyboard.press("ArrowDown")
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                page.keyboard.press("Enter")
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                page.keyboard.press("Tab")
+            else:
+                page.keyboard.press("ArrowDown")
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                page.keyboard.press("ArrowDown")
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                page.keyboard.press("Enter")
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                page.keyboard.press("Tab")
 
-        # 1. Verifica se o DET rejeitou por CNPJ inválido
-        msg_invalido = page.get_by_text(re.compile(r"CNPJ\s+inv.lido", re.IGNORECASE))
-        if msg_invalido.count() > 0 and msg_invalido.first.is_visible():
             time.sleep(DELAY_ENTRE_ACOES_S)
-            page.locator("button:has-text('Cancelar')").first.click()
+            page.keyboard.type(item_id, delay=100)
             time.sleep(DELAY_ENTRE_ACOES_S)
-            logger.warning(f"[{item_id}] [VALIDAÇÃO] CNPJ recusado pelo DET, item ignorado.")
-            if progress_callback:
-                progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} inválido no DET")
-            return False, "CNPJ_RECUSADO_DET", "DET indicou CNPJ inválido"
 
-        # 2. Verifica se o DET acusou falta de procuração ou vínculo
-        msg_sem_procuracao = page.get_by_text(re.compile(r"(procura..o|v.nculo|n.o\s+encontrado|n.o\s+autorizado|perfil\s+n.o)", re.IGNORECASE))
-        if msg_sem_procuracao.count() > 0 and msg_sem_procuracao.first.is_visible():
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            page.locator("button:has-text('Cancelar')").first.click()
-            time.sleep(DELAY_ENTRE_ACOES_S)
-            logger.warning(f"[{item_id}] [VALIDAÇÃO] Sem procuração ou vínculo no DET para o CNPJ.")
-            if progress_callback:
-                progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} sem procuração")
-            return False, "SEM_PROCURACAO", "Não foi encontrado procurador/vínculo no DET"
+            etapa = "Selecionando o perfil e validando CNPJ"
+            page.locator("button:has-text('Selecionar')").first.click()
+            time.sleep(2)
+
+            # 1. Verifica se o DET rejeitou por CNPJ inválido
+            msg_invalido = page.get_by_text(re.compile(r"CNPJ\s+inv.lido", re.IGNORECASE))
+            if msg_invalido.count() > 0 and msg_invalido.first.is_visible():
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                page.locator("button:has-text('Cancelar')").first.click()
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                logger.warning(f"[{item_id}] [VALIDAÇÃO] CNPJ recusado pelo DET, item ignorado.")
+                if progress_callback:
+                    progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} inválido no DET")
+                return False, "CNPJ_RECUSADO_DET", "DET indicou CNPJ inválido"
+
+            # 2. Verifica se o DET acusou falta de procuração ou vínculo
+            msg_sem_procuracao = page.get_by_text(re.compile(r"(procura..o|v.nculo|n.o\s+encontrado|n.o\s+autorizado|perfil\s+n.o)", re.IGNORECASE))
+            if msg_sem_procuracao.count() > 0 and msg_sem_procuracao.first.is_visible():
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                page.locator("button:has-text('Cancelar')").first.click()
+                time.sleep(DELAY_ENTRE_ACOES_S)
+                logger.warning(f"[{item_id}] [VALIDAÇÃO] Sem procuração ou vínculo no DET para o CNPJ.")
+                if progress_callback:
+                    progress_callback(idx_item, total_itens, f"Item {idx_item}/{total_itens} sem procuração")
+                return False, "SEM_PROCURACAO", "Não foi encontrado procurador/vínculo no DET"
 
         # Criação de pastas do item
         etapa = "Criando a pasta do item"
-        pasta_item = screenshots_dir / item_id
+        nome_pasta = sanitizar_nome_pasta(nome_empresa) if nome_empresa else item_id
+        pasta_item = screenshots_dir / nome_pasta
         pasta_caixa_postal = pasta_item / "CaixaPostal"
         pasta_notificacao = pasta_item / "Notificacao"
         pasta_arquivos_baixados = pasta_item / "ArquivosBaixados"
@@ -1268,145 +1567,38 @@ def processar_item_det(
 
         # Aguarda a tela da Caixa Postal carregar
         try:
-            page.locator("h1:has-text('Caixa Postal'), h2:has-text('Caixa Postal'), span:has-text('Caixa de Entrada')").first.wait_for(state="visible", timeout=15000)
+            page.locator("h1:has-text('Caixa Postal'), h2:has-text('Caixa Postal'), [role='heading']:has-text('Caixa Postal'), span:has-text('Caixa de Entrada')").first.wait_for(state="visible", timeout=15000)
         except Exception:
             pass
         time.sleep(DELAY_ENTRE_ACOES_S)
 
-        # Garante que a tela da Caixa Postal suba completamente para o topo
-        rolar_pagina_para_o_topo(page, "h1:has-text('Caixa Postal'), h2:has-text('Caixa Postal'), span:has-text('Caixa de Entrada')")
-        time.sleep(DELAY_ENTRE_ACOES_S)
-
-        # 1. Print ANTES de clicar em 'Exibir apenas não lidas' (visão geral / todas)
-        etapa = "Tirando print da Caixa Postal antes do filtro"
-        try:
-            page.mouse.move(0, 0)
-            time.sleep(0.3)
-            page.evaluate("""() => {
-                const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
-                tooltips.forEach(t => t.remove());
-            }""")
-        except Exception:
-            pass
-
-        # Reforço de rolagem para o topo imediatamente antes da captura
-        rolar_pagina_para_o_topo(page)
-        time.sleep(0.2)
-
-        caminho_print_antes = pasta_caixa_postal / f"{item_id}_{formatted_dt}_parte1_todas.jpg"
-        page.screenshot(path=str(caminho_print_antes), type="jpeg")
-        log_etapa(item_id, etapa, f"Print da Caixa Postal (antes do filtro / todas) realizado com sucesso: {caminho_print_antes.name}")
-        time.sleep(DELAY_ENTRE_ACOES_S)
-
-        # 2. Clica em 'Exibir apenas não lidas'
-        etapa = "Filtrando por mensagens não lidas"
-        loc_nao_lidas_filtro = page.locator(
-            "span:has-text('Exibir apenas não lidas'), "
-            "a:has-text('Exibir apenas não lidas'), "
-            "button:has-text('Exibir apenas não lidas')"
-        ).first
-
-        clicou_filtro = False
-        try:
-            loc_nao_lidas_filtro.wait_for(state="visible", timeout=8000)
-            time.sleep(0.3)
-            loc_nao_lidas_filtro.click()
-            clicou_filtro = True
-            log_etapa(item_id, etapa, "Filtro 'Exibir apenas não lidas' acionado com sucesso.")
-            time.sleep(2)
-        except Exception:
-            try:
-                btn_fallback = page.get_by_text("Exibir apenas não lidas", exact=False).first
-                if btn_fallback.is_visible():
-                    btn_fallback.click()
-                    clicou_filtro = True
-                    log_etapa(item_id, etapa, "Filtro 'Exibir apenas não lidas' acionado via get_by_text.")
-                    time.sleep(2)
-            except Exception:
-                pass
-
-        if clicou_filtro:
-            try:
-                page.mouse.move(0, 0)
-            except Exception:
-                pass
+        if _detectar_seletor_matriz_filiais(page):
+            log_etapa(item_id, "Caixa Postal", "Seletor Matriz/Filiais detectado; capturando prints para Matriz e Filiais.")
+            _selecionar_perfil_caixa_postal(page, item_id, "Matriz")
+            _capturar_caixa_postal_fluxo(
+                page=page,
+                item_id=item_id,
+                pasta_caixa_postal=pasta_caixa_postal,
+                formatted_dt=formatted_dt,
+                prefixo_arquivo="matriz_",
+                rotulo_log="Matriz",
+            )
+            if _selecionar_perfil_caixa_postal(page, item_id, "Filiais"):
+                _capturar_caixa_postal_fluxo(
+                    page=page,
+                    item_id=item_id,
+                    pasta_caixa_postal=pasta_caixa_postal,
+                    formatted_dt=formatted_dt,
+                    prefixo_arquivo="filiais_",
+                    rotulo_log="Filiais",
+                )
         else:
-            btn_todas = page.locator("span:has-text('Exibir todas'), a:has-text('Exibir todas'), button:has-text('Exibir todas')").first
-            if btn_todas.is_visible():
-                log_etapa(item_id, etapa, "Filtro de não lidas já está ativo ('Exibir todas' presente).")
-            else:
-                log_etapa(item_id, etapa, "Aviso: opção 'Exibir apenas não lidas' não foi localizada.")
-
-        # 3. Depois de filtrar: verifica se há mensagens não lidas na tela
-        etapa = "Tirando print da Caixa Postal após o filtro"
-        time.sleep(0.5)
-
-        loc_nao_lidas = page.locator(
-            ".linha.nao-lida, "
-            ".linha:has(i.fa-envelope.active), "
-            ".linha:has(i.fa-envelope), "
-            "i.fa-envelope.active, "
-            "div[class*='nao-lida']"
-        )
-        loc_contador_aba = page.get_by_text(re.compile(r"Caixa de Entrada\s*\([1-9]\d*\)", re.I))
-        linhas_tabela = page.locator(".tabela.mensagens .linha, .tabela .linha")
-        msg_vazio = (
-            page.locator(".empty-row")
-            .or_(page.get_by_text(re.compile(r"nenhum registro|nenhuma mensagem|não há mensagens", re.I)))
-        )
-        btn_exibir_todas = page.locator("span:has-text('Exibir todas'), a:has-text('Exibir todas'), button:has-text('Exibir todas')")
-
-        tem_msg_nao_lida = False
-        try:
-            if loc_nao_lidas.count() > 0 and loc_nao_lidas.first.is_visible():
-                tem_msg_nao_lida = True
-            elif loc_contador_aba.count() > 0 and loc_contador_aba.first.is_visible():
-                tem_msg_nao_lida = True
-            else:
-                filtro_ativo = btn_exibir_todas.count() > 0 and btn_exibir_todas.first.is_visible()
-                tabela_tem_linhas = linhas_tabela.count() > 0 and linhas_tabela.first.is_visible()
-                tabela_vazia = msg_vazio.count() > 0 and msg_vazio.first.is_visible()
-
-                if (filtro_ativo or clicou_filtro) and tabela_tem_linhas and not tabela_vazia:
-                    tem_msg_nao_lida = True
-                else:
-                    try:
-                        loc_nao_lidas.first.wait_for(state="visible", timeout=3000)
-                        tem_msg_nao_lida = True
-                    except PlaywrightTimeoutError:
-                        tem_msg_nao_lida = False
-        except Exception as e:
-            logger.warning(f"[{item_id}] [CAIXA POSTAL] Erro ao verificar mensagens não lidas: {e}")
-            tem_msg_nao_lida = False
-
-        # Tira SEMPRE o print após o filtro (mostrando apenas não lidas ou comprovando que não há nenhuma)
-        time.sleep(DELAY_ENTRE_ACOES_S)
-
-        # Garante que a tela suba para o topo antes do print após o filtro
-        rolar_pagina_para_o_topo(page, "h1:has-text('Caixa Postal'), h2:has-text('Caixa Postal'), span:has-text('Caixa de Entrada')")
-        time.sleep(DELAY_ENTRE_ACOES_S)
-
-        try:
-            page.mouse.move(0, 0)
-            time.sleep(0.6)
-            page.evaluate("""() => {
-                const tooltips = document.querySelectorAll('.tooltip, [role="tooltip"], br-tooltip, .br-tooltip, div[class*="tooltip"], div[class*="popover"]');
-                tooltips.forEach(t => t.remove());
-            }""")
-        except Exception:
-            pass
-
-        # Reforço de rolagem para o topo imediatamente antes da captura
-        rolar_pagina_para_o_topo(page)
-        time.sleep(0.2)
-
-        caminho_print_depois = pasta_caixa_postal / f"{item_id}_{formatted_dt}_parte2_nao_lidas.jpg"
-        page.screenshot(path=str(caminho_print_depois), type="jpeg")
-        if tem_msg_nao_lida:
-            log_etapa(item_id, etapa, f"Print da Caixa Postal (após filtro / não lidas encontradas) realizado com sucesso: {caminho_print_depois.name}")
-        else:
-            log_etapa(item_id, etapa, f"Print da Caixa Postal (após filtro / sem não lidas) realizado com sucesso: {caminho_print_depois.name}")
-        time.sleep(DELAY_ENTRE_ACOES_S)
+            _capturar_caixa_postal_fluxo(
+                page=page,
+                item_id=item_id,
+                pasta_caixa_postal=pasta_caixa_postal,
+                formatted_dt=formatted_dt,
+            )
 
         # Volta para a tela de Serviços
         time.sleep(DELAY_ENTRE_ACOES_S)
@@ -1852,6 +2044,8 @@ def processar_item_det_com_retry(
     perfil_ref: list,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
+    nome_empresa: str = "",
+    eh_proprio_certificado: bool = False,
 ) -> tuple[bool, str, str]:
     """
     Executa processar_item_det e, em caso de FALHA_SISTEMA temporária,
@@ -1867,6 +2061,8 @@ def processar_item_det_com_retry(
         perfil_ref=perfil_ref,
         progress_callback=progress_callback,
         stop_event=stop_event,
+        nome_empresa=nome_empresa,
+        eh_proprio_certificado=eh_proprio_certificado,
     )
 
     if not sucesso and status_code == "FALHA_SISTEMA":
@@ -1887,6 +2083,8 @@ def processar_item_det_com_retry(
                 perfil_ref=perfil_ref,
                 progress_callback=progress_callback,
                 stop_event=stop_event,
+                nome_empresa=nome_empresa,
+                eh_proprio_certificado=eh_proprio_certificado,
             )
             if sucesso:
                 detalhe = f"{detalhe} (recuperado no retry imediato)"
@@ -1898,9 +2096,10 @@ def processar_item_det_com_retry(
 
 class ItemExecucao:
     """Representa o ciclo de vida e histórico de execução de um CNPJ nas duas tentativas."""
-    def __init__(self, cnpj: str, certificado: str):
+    def __init__(self, cnpj: str, certificado: str, nome: str):
         self.cnpj = str(cnpj).strip()
         self.certificado = str(certificado).strip()
+        self.nome = str(nome).strip()
         self.status_t1 = "NAO_EXECUTADO"
         self.detalhe_t1 = ""
         self.status_t2 = "-"
@@ -1925,6 +2124,7 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
 
     headers = [
         "CNPJ",
+        "Nome da Empresa",
         "Certificado",
         "Status 1ª Tentativa",
         "Detalhe 1ª Tentativa",
@@ -1958,6 +2158,7 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
 
         ws.append([
             it.cnpj,
+            it.nome,
             it.certificado,
             it.status_t1,
             it.detalhe_t1,
@@ -1967,7 +2168,7 @@ def salvar_relatorio_execucao(base_dir: Path, execucao_dt_str: str, itens: list[
             it.data_hora or datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
         ])
         row_idx = ws.max_row
-        status_cell = ws.cell(row=row_idx, column=7)
+        status_cell = ws.cell(row=row_idx, column=8)
         if it.status_final == "SUCESSO":
             status_cell.fill = fill_sucesso
         elif it.status_final == "EXIGE_2FA":
@@ -2006,6 +2207,7 @@ def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Opti
         ws.title = "CNPJs_consultados"
         ws["A1"] = "CNPJ"
         ws["B1"] = "Certificado"
+        ws["C1"] = "Nome da Empresa"
 
         cor_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
         fonte_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -2018,19 +2220,20 @@ def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Opti
         )
 
         ws.row_dimensions[1].height = 24
-        for col_idx in [1, 2]:
+        for col_idx in [1, 2, 3]:
             c = ws.cell(row=1, column=col_idx)
             c.fill = cor_header
             c.font = fonte_header
             c.alignment = alinhamento_centro
 
         for p in pendentes:
-            ws.append([p.cnpj, p.certificado])
+            ws.append([p.cnpj, p.certificado, p.nome])
 
         for row_idx in range(2, ws.max_row + 1):
             ws.row_dimensions[row_idx].height = 20
             c_cnpj = ws.cell(row=row_idx, column=1)
             c_cert = ws.cell(row=row_idx, column=2)
+            c_nome = ws.cell(row=row_idx, column=3)
             c_cnpj.font = Font(name="Calibri", size=11)
             c_cnpj.alignment = alinhamento_centro
             c_cnpj.border = borda_fina
@@ -2038,9 +2241,13 @@ def salvar_planilha_pendentes(base_dir: Path, itens: list[ItemExecucao]) -> Opti
             c_cert.font = Font(name="Calibri", size=11)
             c_cert.alignment = Alignment(horizontal="left", vertical="center")
             c_cert.border = borda_fina
+            c_nome.font = Font(name="Calibri", size=11)
+            c_nome.alignment = Alignment(horizontal="left", vertical="center")
+            c_nome.border = borda_fina
 
         ws.column_dimensions["A"].width = 25
         ws.column_dimensions["B"].width = 65
+        ws.column_dimensions["C"].width = 45
 
         wb.save(str(caminho_pendentes))
         wb.close()
@@ -2592,7 +2799,7 @@ def processar_sessao_certificado(
     Executa a sessão completa para um grupo de certificado (Fases 1 a 4):
     - Login no Gov.br com retry contra Captcha e Fallback com espera de 60s em caso de portal fora do ar.
     - Conexão Playwright via CDP.
-    - Renovação preventiva de sessão (antes de expirar os 30 min) e reautenticação automática se a sessão cair.
+    - Reautenticação automática caso a sessão expire inesperadamente.
     - Processamento de cada CNPJ com retry imediato em caso de erro temporário.
     - Atualização do histórico em mapa_itens (rodada 1 ou rodada 2).
     - Logout e fechamento limpo do navegador.
@@ -2636,7 +2843,6 @@ def processar_sessao_certificado(
         if not sucesso_login:
             return False
 
-        inicio_sessao = time.time()
         time.sleep(DELAY_ENTRE_ACOES_S)
         logger.info(f"[LOGIN] Sessão confirmada: Pronto para processamento de CNPJs do certificado '{nome_cert_exibicao}'!")
 
@@ -2661,36 +2867,6 @@ def processar_sessao_certificado(
             if not item_id:
                 continue
 
-            # Renovação preventiva de sessão antes que o limite de ~30 min do DET expire
-            tempo_decorrido_sessao = time.time() - inicio_sessao
-            if tempo_decorrido_sessao >= TEMPO_RENOVACAO_SESSAO_S:
-                minutos_ativos = tempo_decorrido_sessao / 60.0
-                logger.info(
-                    f"[SESSÃO] Sessão do certificado '{nome_cert_exibicao}' ativa há {minutos_ativos:.1f} min "
-                    f"(limite preventivo: {TEMPO_RENOVACAO_SESSAO_S / 60:.0f} min). "
-                    f"Renovando sessão antes do próximo CNPJ ({item_id})..."
-                )
-                if progress_callback:
-                    progress_callback(
-                        item_global_counter[0],
-                        total_itens,
-                        f"Renovando sessão do certificado '{nome_cert_exibicao[:20]}'...",
-                    )
-                encerrar_sessao_det_navegador(
-                    playwright_mgr, browser, context, page, nome_cert_exibicao, fazer_logout=True
-                )
-                playwright_mgr = browser = context = page = None
-                time.sleep(2)
-
-                sucesso_login, playwright_mgr, browser, context, page = _abrir_sessao(lista_cnpjs[idx_lista:])
-                if not sucesso_login:
-                    return False
-
-                inicio_sessao = time.time()
-                perfil_ref = [0]
-                time.sleep(DELAY_ENTRE_ACOES_S)
-                logger.info(f"[SESSÃO] Sessão renovada com sucesso para '{nome_cert_exibicao}'!")
-
             it = mapa_itens[item_id]
             idx_atual = item_global_counter[0] + 1
 
@@ -2700,6 +2876,8 @@ def processar_sessao_certificado(
                     total_itens,
                     f"R{rodada}: Processando {idx_atual}/{total_itens} ({item_id}) [Cert: {nome_cert_exibicao[:20]}]",
                 )
+
+            eh_proprio = eh_cnpj_do_certificado(item_id, cert_alvo)
 
             # Executa com retry imediato em caso de erro temporário
             sucesso, status_code, detalhe = processar_item_det_com_retry(
@@ -2712,6 +2890,8 @@ def processar_sessao_certificado(
                 perfil_ref=perfil_ref,
                 progress_callback=progress_callback,
                 stop_event=stop_event,
+                nome_empresa=it.nome,
+                eh_proprio_certificado=eh_proprio,
             )
 
             # Se a sessão expirou ou foi fechada pelo DET/Gov.br, reautentica e reexecuta o mesmo CNPJ
@@ -2730,7 +2910,6 @@ def processar_sessao_certificado(
                 if not sucesso_login:
                     return False
 
-                inicio_sessao = time.time()
                 perfil_ref = [0]
                 time.sleep(DELAY_ENTRE_ACOES_S)
 
@@ -2744,6 +2923,8 @@ def processar_sessao_certificado(
                     perfil_ref=perfil_ref,
                     progress_callback=progress_callback,
                     stop_event=stop_event,
+                    nome_empresa=it.nome,
+                    eh_proprio_certificado=eh_proprio,
                 )
                 if sucesso:
                     detalhe = f"{detalhe} (recuperado após renovação de sessão)"
@@ -2862,6 +3043,7 @@ def executar_robo_hibrido(
             ws.title = "CNPJs_consultados"
             ws["A1"] = "CNPJ"
             ws["B1"] = "Certificado"
+            ws["C1"] = "Nome da Empresa"
             cor_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
             fonte_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
             alinhamento_centro = Alignment(horizontal="center", vertical="center")
@@ -2872,8 +3054,13 @@ def executar_robo_hibrido(
             ws["B1"].fill = cor_header
             ws["B1"].font = fonte_header
             ws["B1"].alignment = alinhamento_centro
+            ws["C1"].fill = cor_header
+            ws["C1"].font = fonte_header
+            ws["C1"].alignment = alinhamento_centro
             ws.column_dimensions["A"].width = 25
             ws.column_dimensions["B"].width = 65
+            ws.column_dimensions["C"].width = 45
+
             wb.save(str(excel_path))
             wb.close()
             logger.info(f"[PLANILHA] Planilha modelo criada automaticamente com sucesso em: {excel_path}")
@@ -2897,8 +3084,9 @@ def executar_robo_hibrido(
                 continue
             col_a = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
             col_b = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+            col_c = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
             if col_a:
-                linhas_lidas.append((col_a, col_b))
+                linhas_lidas.append((col_a, col_b, col_c))
         wb.close()
     except Exception as e:
         logger.error(f"[PLANILHA] Erro ao ler a planilha {excel_path}: {e}")
@@ -2910,7 +3098,7 @@ def executar_robo_hibrido(
         "DOCUMENTO", "DOCUMENTOS", "CNPJS_CONSULTADOS"
     }
     dados_filtrados = [
-        (doc, cert) for doc, cert in linhas_lidas
+        (doc, cert, nome) for doc, cert, nome in linhas_lidas
         if doc.upper() not in header_names
     ]
 
@@ -2922,15 +3110,19 @@ def executar_robo_hibrido(
 
     # Inicializa o mapa de rastreamento de cada CNPJ para o relatório de execução
     mapa_itens: dict[str, ItemExecucao] = {
-        doc: ItemExecucao(doc, cert)
-        for doc, cert in dados_filtrados
+        doc: ItemExecucao(doc, cert, nome)
+        for doc, cert, nome in dados_filtrados
     }
 
     # Agrupamento por certificado de todos os CNPJs da planilha (sem validação de formato prévia)
     grupos_certificados = defaultdict(list)
-    for doc, cert in dados_filtrados:
+    for doc, cert, nome in dados_filtrados:
         cert_chave = cert.strip()
         grupos_certificados[cert_chave].append(doc)
+    for cert_chave in grupos_certificados:
+        grupos_certificados[cert_chave] = priorizar_proprio_certificado_no_grupo(
+            grupos_certificados[cert_chave], cert_chave
+        )
 
     total_itens = len(dados_filtrados)
     total_grupos = len(grupos_certificados)
@@ -2986,6 +3178,10 @@ def executar_robo_hibrido(
             grupos_pendentes = defaultdict(list)
             for it in itens_pendentes:
                 grupos_pendentes[it.certificado].append(it.cnpj)
+            for cert_chave in grupos_pendentes:
+                grupos_pendentes[cert_chave] = priorizar_proprio_certificado_no_grupo(
+                    grupos_pendentes[cert_chave], cert_chave
+                )
 
             total_grupos_p = len(grupos_pendentes)
             item_counter_r2 = [0]
